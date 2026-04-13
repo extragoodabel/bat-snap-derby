@@ -1,0 +1,63 @@
+.shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  padding: 1rem 1.25rem 1.5rem;
+  box-sizing: border-box;
+  gap: 1rem;
+}
+
+.hud {
+  text-align: center;
+}
+
+.title {
+  margin: 0 0 0.5rem;
+  font-size: clamp(1.75rem, 5vw, 2.5rem);
+  letter-spacing: -0.02em;
+  color: var(--text-h);
+}
+
+.tagline {
+  margin: 0 auto;
+  max-width: 36rem;
+  font-size: 0.95rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.playfield {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: min(50vh, 420px);
+  border-radius: 12px;
+  border: 2px dashed var(--border-strong);
+  background: var(--playfield-bg);
+}
+
+.placeholder {
+  margin: 0;
+  padding: 1rem;
+  max-width: 22rem;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.footer {
+  text-align: center;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.disclaimer {
+  margin: 0 0 0.35rem;
+}
+
+.rotate-hint {
+  margin: 0;
+  opacity: 0.85;
+}
