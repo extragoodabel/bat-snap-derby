@@ -20,8 +20,8 @@ import { useGameLoop } from './useGameLoop'
 
 const ASPECT = 16 / 9
 const GRAVITY = 700
-/** Batted balls only: gentler pull so initial velocity can reach the left-side wheel. */
-const OUTGOING_GRAVITY = 500
+/** Batted balls only: balanced with exit speed so balls stay lively but arc. */
+const OUTGOING_GRAVITY = 468
 const RING_OMEGA = 0.55
 /** Concentric rows: index 0 = front/smallest, 2 = back/largest. */
 const RING_COUNT = 3
@@ -103,8 +103,8 @@ const PREVIEW_STEPS = 32
 /** After pull-back, delay before the mound fires (readable telegraph). */
 const PITCH_ARM_DELAY_SEC = 0.32
 /** Incoming pitch speed band (px/s); fast, batting-like. */
-const PITCH_SPEED_MIN = 1180
-const PITCH_SPEED_MAX = 1580
+const PITCH_SPEED_MIN = 1260
+const PITCH_SPEED_MAX = 1680
 /** Small vertical accel on incoming ball only (shallow arc; not full gravity). */
 const PITCH_INCOMING_AY_MIN = -140
 const PITCH_INCOMING_AY_MAX = 120
@@ -121,7 +121,7 @@ const SWEET_SPOT_RADIUS_FR = 0.2
 /** Auto pitch if idle this long (s) with no ball in play. */
 const AUTO_PITCH_IDLE_SEC = 5
 /** Generous plate + upper-barrel contact read. */
-const CONTACT_ZONE_R = 128
+const CONTACT_ZONE_R = 142
 /**
  * |timingError| ≤ PERFECT → best tier; ≤ GOOD → solid hit; ≤ POOR → weak; else dribble;
  * beyond MISS → no batted ball (passed through).
@@ -129,17 +129,25 @@ const CONTACT_ZONE_R = 128
 const TIMING_PERFECT_SEC = 0.048
 const TIMING_GOOD_SEC = 0.13
 const TIMING_POOR_SEC = 0.24
-const TIMING_MISS_SEC = 0.38
-/** Outgoing exit-speed band (px/s); scaled by pullback × timing × sweet-spot. */
-const OUT_SPEED_MIN = 640
-const OUT_SPEED_MAX = 2100
-const OUT_SPEED_DRIBBLE = 480
-/** Timing error maps to board steer: radians added to gallery bearing (early −, late +). */
-const TIMING_YAW_MAX_RAD = 0.58
-/** Pullback adds launch loft (rad toward sky vs ref); capped for playable corridor. */
-const PULLBACK_LOFT_MAX_RAD = 0.42
-/** Off-barrel: deterministic angular scatter (rad) scaled by (1 − sweet q). */
-const OFF_BARREL_ANGLE_SCATTER_RAD = 0.36
+const TIMING_MISS_SEC = 0.44
+/** Outgoing exit-speed band (px/s); pullback sets band, timing/barrel trim — not stacked into mush. */
+const OUT_SPEED_MIN = 920
+const OUT_SPEED_MAX = 2480
+const OUT_SPEED_DRIBBLE = 620
+/** Fine trim on top of aim-point steering (sweet spot steadies the barrel). */
+const TIMING_YAW_MAX_RAD = 0.42
+/** Pullback adds launch loft on top of aim-based plane. */
+const PULLBACK_LOFT_MAX_RAD = 0.44
+/** Small constant loft so fair balls don’t knife into the dirt. */
+const FAIR_CONTACT_BASE_LOFT_RAD = 0.055
+const DRIBBLE_BASE_LOFT_RAD = 0.032
+/** Off-barrel wobble — keep smaller so good contact feels crisp, not slot-like. */
+const OFF_BARREL_ANGLE_SCATTER_RAD = 0.2
+
+/** Exit reward: only high combined pullback × timing × sweet unlocks moonshot. */
+const EXIT_SCORE_MOONSHOT = 0.885
+const EXIT_SCORE_POWER = 0.765
+const EXIT_SCORE_CARRY = 0.628
 /** Batter pivot height (fraction of canvas h); higher on screen = smaller fraction. */
 const BAT_PIVOT_X_FR = 0.88
 const BAT_PIVOT_Y_FR = 0.74
@@ -167,6 +175,9 @@ type PowerTier =
   | 'strong'
   | 'full_send'
   | 'perfect_full_send'
+
+/** Top-end batted-ball reward ladder (separate from score tier / pierce). */
+type ExitRewardBand = 'standard' | 'carry' | 'power' | 'moonshot'
 
 type ContactQualityBucket =
   | 'miss'
@@ -325,6 +336,10 @@ type Sim = {
   ballShotTier: PowerTier
   /** Perfect full send: first hit pierces (ball survives once). */
   ballPierceArmed: boolean
+  /** Active outgoing: reward band from last contact (trail / labels). */
+  ballExitBand: ExitRewardBand
+  /** Outgoing gravity scale (elite = gentler drop for carry). */
+  ballOutgoingGravityMul: number
 
   score: number
   releaseFlashRemain: number
@@ -373,6 +388,8 @@ type Sim = {
   debugTransferEff: number
   debugPullbackUAtContact: number
   debugAutoPitch: boolean
+  debugExitBandPreview: ExitRewardBand
+  debugLastExitBand: ExitRewardBand
 }
 
 function ringMidRadius(Ro: number): number {
@@ -727,6 +744,8 @@ function createSim(w: number, h: number): Sim {
     powerTierRelease: 'normal',
     ballShotTier: 'normal',
     ballPierceArmed: false,
+    ballExitBand: 'standard',
+    ballOutgoingGravityMul: 1,
     score: 0,
     releaseFlashRemain: 0,
     releaseFlashTier: null,
@@ -763,6 +782,8 @@ function createSim(w: number, h: number): Sim {
     debugTransferEff: 0,
     debugPullbackUAtContact: 0,
     debugAutoPitch: false,
+    debugExitBandPreview: 'standard',
+    debugLastExitBand: 'standard',
   }
 }
 
@@ -839,7 +860,8 @@ function classifyContactBucket(timingErrorSec: number): ContactQualityBucket {
 
 function contactQuality01(timingErrorSec: number): number {
   const ae = Math.abs(timingErrorSec)
-  return clamp(1 - ae / TIMING_GOOD_SEC, 0.14, 1)
+  /** Softer floor: “close” swings stay energetic; only poor timing really bleeds power. */
+  return clamp(1 - ae / TIMING_GOOD_SEC, 0.4, 1)
 }
 
 function powerTierFromTimingAbs(absErr: number): PowerTier {
@@ -891,9 +913,9 @@ function combinedTransfer(
   sweetQu: number,
   pullbackU: number
 ): number {
-  const sw = 0.35 + 0.65 * sweetQu
-  const pu = 0.42 + 0.58 * pullbackU
-  return clamp(0.18 + 0.82 * quality * sw * pu, 0, 1)
+  const sw = 0.38 + 0.62 * sweetQu
+  const pu = 0.48 + 0.52 * pullbackU
+  return clamp(0.28 + 0.72 * quality * sw * pu, 0, 1)
 }
 
 function powerTierFromContact(transfer: number, absErr: number): PowerTier {
@@ -923,9 +945,67 @@ function timingSteerForBoard(errSec: number): number {
   return sign * (0.17 + u2 * 0.93)
 }
 
+function classifyExitRewardBand(
+  pu: number,
+  quality: number,
+  sweetQu: number,
+  bucket: ContactQualityBucket
+): ExitRewardBand {
+  if (
+    bucket === 'dribble' ||
+    bucket === 'poor_early' ||
+    bucket === 'poor_late'
+  ) {
+    return 'standard'
+  }
+  const linear = 0.34 * pu + 0.33 * quality + 0.33 * sweetQu
+  const triple = pu * quality * (0.1 + 0.9 * sweetQu)
+  const score =
+    0.4 * linear + 0.6 * Math.pow(clamp(triple, 0, 1), 0.4)
+
+  if (
+    score >= EXIT_SCORE_MOONSHOT &&
+    pu >= 0.83 &&
+    quality >= 0.85 &&
+    sweetQu >= 0.66
+  ) {
+    return 'moonshot'
+  }
+  if (
+    score >= EXIT_SCORE_POWER &&
+    pu >= 0.68 &&
+    quality >= 0.7 &&
+    sweetQu >= 0.32
+  ) {
+    return 'power'
+  }
+  if (score >= EXIT_SCORE_CARRY && pu >= 0.46 && quality >= 0.48) {
+    return 'carry'
+  }
+  return 'standard'
+}
+
+function exitBandBonuses(band: ExitRewardBand): {
+  loftRad: number
+  speedMul: number
+  gravityMul: number
+} {
+  switch (band) {
+    case 'moonshot':
+      return { loftRad: 0.44, speedMul: 1.24, gravityMul: 0.62 }
+    case 'power':
+      return { loftRad: 0.22, speedMul: 1.1, gravityMul: 0.76 }
+    case 'carry':
+      return { loftRad: 0.11, speedMul: 1.036, gravityMul: 0.88 }
+    default:
+      return { loftRad: 0, speedMul: 1, gravityMul: 1 }
+  }
+}
+
 /**
  * Baseball-style contact: launch angle + exit speed from timing (steer), sweet-spot (clean/variance),
  * and pullback (force band). Same function drives live hit and dotted preview.
+ * Top exit bands add clean loft + carry (moonshot can clear the board).
  */
 function battedBallOutcome(
   sim: Sim,
@@ -942,6 +1022,8 @@ function battedBallOutcome(
   speed: number
   aimDeg: number
   transferEff: number
+  exitBand: ExitRewardBand
+  outgoingGravityMul: number
 } {
   const bucket = classifyContactBucket(timingErrorSec)
   if (bucket === 'miss') {
@@ -953,24 +1035,37 @@ function battedBallOutcome(
       speed: 0,
       aimDeg: 0,
       transferEff: 0,
+      exitBand: 'standard',
+      outgoingGravityMul: 1,
     }
   }
   const quality = contactQuality01(timingErrorSec)
   const transfer = combinedTransfer(quality, sweetQu, pullbackU)
 
   const b = galleryPlayBounds(sim)
-  const rdx = b.cx - fromX
-  const rdy = b.cy - fromY
+  const tSteer = timingSteerForBoard(timingErrorSec)
+
+  /**
+   * Timing steers a concrete aim spot on the wheel (early/late = sides, quality = row height).
+   * Player sees cause → effect like barrel meeting pitch, not a hidden lottery vector.
+   */
+  const aimTx = b.cx + tSteer * b.halfW * 0.9
+  const verticalFrac = clamp(
+    0.2 + 0.48 * (1 - quality) - 0.07 * sweetQu + tSteer * tSteer * 0.04,
+    0.08,
+    0.62
+  )
+  const aimTy = b.cy - b.halfH * verticalFrac
+
+  const rdx = aimTx - fromX
+  const rdy = aimTy - fromY
   const refAngle = Math.atan2(rdy, rdx)
 
-  const tSteer = timingSteerForBoard(timingErrorSec)
-  const timingYaw = tSteer * TIMING_YAW_MAX_RAD
+  /** Sweet-spot steadies fine yaw; doesn’t erase timing steer (aim point already did the work). */
+  const aimStiffness = 0.38 + 0.62 * sweetQu
+  const trimYaw = tSteer * TIMING_YAW_MAX_RAD * aimStiffness
 
-  /** Sweet-spot: trajectory stability (tames yaw + jitter). */
-  const aimStiffness = 0.22 + 0.78 * sweetQu
-  const yawEff = timingYaw * aimStiffness
-
-  /** Off-barrel: deterministic spread so preview matches resolution. */
+  /** Off-barrel: small deterministic wobble only when q is low. */
   const jitter =
     Math.sin(
       timingErrorSec * 103.417 + sweetQu * 27.913 + pullbackU * 8.771
@@ -978,39 +1073,81 @@ function battedBallOutcome(
     OFF_BARREL_ANGLE_SCATTER_RAD *
     (1 - sweetQu)
 
-  /** Pullback: exit speed (primary) + moderate launch height; capped corridor. */
+  /** Pullback: power into the ball + a bit more sky when loaded. */
   const pu = clamp(pullbackU, 0, 1)
   const pullLoftRaw =
-    (pu - 0.1) * PULLBACK_LOFT_MAX_RAD * (0.52 + 0.48 * sweetQu)
-  const pullLoft = clamp(pullLoftRaw, -0.1, PULLBACK_LOFT_MAX_RAD * 0.92)
+    (pu - 0.06) * PULLBACK_LOFT_MAX_RAD * (0.5 + 0.5 * sweetQu)
+  const pullLoft = clamp(pullLoftRaw, -0.04, PULLBACK_LOFT_MAX_RAD * 0.88)
 
-  const angle = refAngle + yawEff + jitter + pullLoft
+  const baseLoft =
+    bucket === 'dribble' ? DRIBBLE_BASE_LOFT_RAD : FAIR_CONTACT_BASE_LOFT_RAD
+  const baseAngle = refAngle + trimYaw + jitter + pullLoft + baseLoft
 
   let speed: number
   if (bucket === 'dribble') {
     const v0 =
       OUT_SPEED_DRIBBLE *
-      (0.4 + 0.52 * quality) *
-      (0.5 + 0.5 * pu) *
-      (0.58 + 0.42 * sweetQu)
-    speed = clamp(v0, 200, OUT_SPEED_MIN * 0.9)
+      (0.52 + 0.4 * quality) *
+      (0.58 + 0.42 * pu) *
+      (0.65 + 0.35 * sweetQu)
+    speed = clamp(v0, 340, OUT_SPEED_MIN * 0.88)
   } else {
-    const pullCore = Math.pow(pu, 0.78)
+    const pullCore = Math.pow(pu, 0.62)
     const speedBand = OUT_SPEED_MIN + pullCore * (OUT_SPEED_MAX - OUT_SPEED_MIN)
-    const timingEff = 0.32 + 0.68 * quality
-    const barrelEff = 0.45 + 0.55 * sweetQu
+    /** High floors so “I put a swing on it” always feels like baseball, not a dying lob. */
+    const timingEff = 0.58 + 0.42 * quality
+    const barrelEff = 0.72 + 0.28 * sweetQu
     speed = speedBand * timingEff * barrelEff
-    speed = clamp(speed, 360, OUT_SPEED_MAX)
+    speed = clamp(speed, 520, OUT_SPEED_MAX)
   }
 
-  const vx = Math.cos(angle) * speed
-  const vy = Math.sin(angle) * speed
+  const exitBand = classifyExitRewardBand(pu, quality, sweetQu, bucket)
+  const bon = exitBandBonuses(exitBand)
+  const angle = baseAngle + bon.loftRad
+  let speedOut = speed * bon.speedMul
+  const maxSp =
+    exitBand === 'moonshot'
+      ? OUT_SPEED_MAX * 1.38
+      : exitBand === 'power'
+        ? OUT_SPEED_MAX * 1.16
+        : exitBand === 'carry'
+          ? OUT_SPEED_MAX * 1.05
+          : OUT_SPEED_MAX
+  speedOut = bucket === 'dribble' ? speed : clamp(speedOut, 420, maxSp)
+
+  const vx = Math.cos(angle) * speedOut
+  const vy = Math.sin(angle) * speedOut
   const aimDeg = (Math.atan2(vy, vx) * 180) / Math.PI
-  const tier =
+  let tier: PowerTier =
     bucket === 'dribble' || bucket === 'poor_early' || bucket === 'poor_late'
       ? 'normal'
       : powerTierFromContact(transfer, Math.abs(timingErrorSec))
-  return { vx, vy, bucket, tier, speed, aimDeg, transferEff: transfer }
+
+  if (exitBand === 'moonshot' && bucket !== 'dribble') {
+    if (
+      Math.abs(timingErrorSec) <= TIMING_GOOD_SEC * 0.38 &&
+      sweetQu >= 0.52 &&
+      pu >= 0.78
+    ) {
+      tier = 'perfect_full_send'
+    } else if (tier !== 'perfect_full_send') {
+      tier = 'full_send'
+    }
+  } else if (exitBand === 'power' && tier === 'normal' && quality >= 0.62) {
+    tier = 'strong'
+  }
+
+  return {
+    vx,
+    vy,
+    bucket,
+    tier,
+    speed: speedOut,
+    aimDeg,
+    transferEff: transfer,
+    exitBand,
+    outgoingGravityMul: bon.gravityMul,
+  }
 }
 
 /** If player released with current θ and power, seconds until bat crosses launch plane. */
@@ -1141,11 +1278,12 @@ function samplePreviewPoint(
   tipY: number,
   vx0: number,
   vy0: number,
-  t: number
+  t: number,
+  gravity = OUTGOING_GRAVITY
 ): { x: number; y: number } {
   return {
     x: tipX + vx0 * t,
-    y: tipY + vy0 * t + 0.5 * OUTGOING_GRAVITY * t * t,
+    y: tipY + vy0 * t + 0.5 * gravity * t * t,
   }
 }
 
@@ -1161,6 +1299,13 @@ function drawPostHitTrajectoryPreview(ctx: CanvasRenderingContext2D, sim: Sim): 
 
   const vx0 = out.vx
   const vy0 = out.vy
+  const gPreview = OUTGOING_GRAVITY * out.outgoingGravityMul
+  const prevRgb =
+    out.exitBand === 'moonshot'
+      ? [255, 210, 90]
+      : out.exitBand === 'power'
+        ? [120, 230, 255]
+        : [0, 210, 255]
 
   ctx.save()
   ctx.setLineDash([6, 5])
@@ -1168,10 +1313,17 @@ function drawPostHitTrajectoryPreview(ctx: CanvasRenderingContext2D, sim: Sim): 
   for (let k = 1; k <= PREVIEW_STEPS; k++) {
     const u = (k - 1) / Math.max(1, PREVIEW_STEPS - 1)
     const alpha = 0.9 * (1 - 0.88 * u) + 0.1
-    const lw = 3.4 * (1 - 0.55 * u) + 1.15
+    const lw =
+      (out.exitBand === 'moonshot'
+        ? 5.2
+        : out.exitBand === 'power'
+          ? 4.1
+          : 3.4) *
+        (1 - 0.55 * u) +
+      1.15
     const t = k * PREVIEW_DT
-    const cur = samplePreviewPoint(ix.x, ix.y, vx0, vy0, t)
-    ctx.strokeStyle = `rgba(0, 210, 255, ${alpha.toFixed(3)})`
+    const cur = samplePreviewPoint(ix.x, ix.y, vx0, vy0, t, gPreview)
+    ctx.strokeStyle = `rgba(${prevRgb[0]}, ${prevRgb[1]}, ${prevRgb[2]}, ${alpha.toFixed(3)})`
     ctx.lineWidth = lw
     ctx.beginPath()
     ctx.moveTo(prev.x, prev.y)
@@ -1325,12 +1477,27 @@ function drawReleaseFlash(ctx: CanvasRenderingContext2D, sim: Sim): void {
 
 function drawBallTrail(ctx: CanvasRenderingContext2D, sim: Sim): void {
   const tier = sim.ballShotTier
-  const thick = tier === 'perfect_full_send' ? 4 : tier === 'full_send' ? 3 : 2
+  const band = sim.ballExitBand
+  let thick = 2
+  if (band === 'moonshot') thick = 6.2
+  else if (band === 'power') thick = 4.8
+  else if (band === 'carry') thick = 3.2
+  else
+    thick = tier === 'perfect_full_send' ? 4 : tier === 'full_send' ? 3 : 2
   for (let i = sim.ballTrail.length - 1; i >= 0; i--) {
     const pt = sim.ballTrail[i]
     const u = i / Math.max(1, sim.ballTrail.length - 1)
-    const alpha = 0.12 + (1 - u) * 0.38
-    if (tier === 'perfect_full_send') {
+    const alpha =
+      band === 'moonshot'
+        ? 0.18 + (1 - u) * 0.52
+        : band === 'power'
+          ? 0.15 + (1 - u) * 0.45
+          : 0.12 + (1 - u) * 0.38
+    if (band === 'moonshot') {
+      ctx.fillStyle = `rgba(255, 200, 120, ${alpha})`
+    } else if (band === 'power') {
+      ctx.fillStyle = `rgba(255, 210, 140, ${alpha})`
+    } else if (tier === 'perfect_full_send') {
       ctx.fillStyle = `rgba(255, 120, 60, ${alpha})`
     } else if (tier === 'full_send') {
       ctx.fillStyle = `rgba(255, 200, 100, ${alpha})`
@@ -1515,6 +1682,7 @@ function drawDebugOverlay(ctx: CanvasRenderingContext2D, sim: Sim): void {
     `pitch v: ${sim.pitchSpeedNominal.toFixed(0)}  incoming ay: ${sim.pitchIncomingAy.toFixed(0)}  frT: ${sim.pitchContactFracT.toFixed(2)}  relDy: ${sim.pitchReleaseDyPx.toFixed(1)}`,
     `sweetQ prev: ${sim.debugSweetQPreview.toFixed(2)}  @hit: ${sim.debugSweetQAtContact.toFixed(2)}  batT: ${sim.debugContactAlongT.toFixed(2)}`,
     `xfer: ${sim.debugTransferEff.toFixed(2)}  pullU@hit: ${sim.debugPullbackUAtContact.toFixed(2)}  idle: ${sim.idleAutoPitchAccum.toFixed(2)}s`,
+    `exit prev: ${sim.debugExitBandPreview}  last: ${sim.debugLastExitBand}  g×: ${sim.ballOutgoingGravityMul.toFixed(2)}`,
     `idealContactT: ${idealStr}  swingCrossT: ${swingStr}  simT: ${sim.simTime.toFixed(3)}`,
     `timingErr: ${terrStr}  predErr: ${predErrStr}  steer: ${steerStr}  bucket: ${sim.debugContactBucket}`,
     `launch θ: ${sim.debugLaunchAngleDeg.toFixed(1)}°  speed: ${sim.debugLaunchSpeed.toFixed(0)}`,
@@ -1587,6 +1755,8 @@ function spawnIncomingPitch(sim: Sim, opts?: { auto?: boolean }): void {
   sim.ballRole = 'incoming'
   sim.ballShotTier = 'normal'
   sim.ballPierceArmed = false
+  sim.ballExitBand = 'standard'
+  sim.ballOutgoingGravityMul = 1
   sim.ballTrail = []
   const travelSec =
     Math.abs(vx) > 80 ? (target.x - start.x) / vx : len / sp
@@ -1807,6 +1977,20 @@ export function GameCanvas() {
         ctx.fillStyle = '#f2e6d8'
         ctx.strokeStyle = 'rgba(200, 120, 60, 0.75)'
         ctx.lineWidth = 2
+      } else if (
+        sim.ballRole === 'outgoing' &&
+        sim.ballExitBand === 'moonshot'
+      ) {
+        ctx.fillStyle = '#3a2416'
+        ctx.strokeStyle = 'rgba(255, 235, 160, 0.98)'
+        ctx.lineWidth = 3
+      } else if (
+        sim.ballRole === 'outgoing' &&
+        sim.ballExitBand === 'power'
+      ) {
+        ctx.fillStyle = '#342818'
+        ctx.strokeStyle = 'rgba(255, 200, 110, 0.9)'
+        ctx.lineWidth = 2.5
       } else if (sim.ballShotTier === 'perfect_full_send') {
         ctx.fillStyle = '#3a2a22'
         ctx.strokeStyle = 'rgba(255, 120, 60, 0.85)'
@@ -1823,12 +2007,26 @@ export function GameCanvas() {
       ctx.fill()
       if (
         sim.ballRole === 'incoming' ||
+        sim.ballExitBand === 'moonshot' ||
+        sim.ballExitBand === 'power' ||
         sim.ballShotTier === 'full_send' ||
         sim.ballShotTier === 'perfect_full_send'
       ) {
         ctx.stroke()
       }
-      if (
+      if (sim.ballRole === 'outgoing' && sim.ballExitBand === 'moonshot') {
+        ctx.save()
+        ctx.font = 'bold 11px system-ui, sans-serif'
+        ctx.fillStyle = 'rgba(255, 230, 150, 0.98)'
+        ctx.fillText('MOONSHOT', sim.ball.x - 34, sim.ball.y - sim.ball.r - 8)
+        ctx.restore()
+      } else if (sim.ballRole === 'outgoing' && sim.ballExitBand === 'power') {
+        ctx.save()
+        ctx.font = 'bold 10px system-ui, sans-serif'
+        ctx.fillStyle = 'rgba(255, 210, 130, 0.95)'
+        ctx.fillText('POWER', sim.ball.x - 22, sim.ball.y - sim.ball.r - 7)
+        ctx.restore()
+      } else if (
         sim.ballRole === 'outgoing' &&
         sim.ballShotTier === 'perfect_full_send'
       ) {
@@ -2007,6 +2205,7 @@ export function GameCanvas() {
         pullbackU,
         sweetPrev
       )
+      sim.debugExitBandPreview = outPrev.exitBand
       sim.debugPredictedTimingErrorSec = errPred
       if (outPrev.bucket === 'miss') {
         sim.debugPredictedPostHitVel = null
@@ -2017,6 +2216,7 @@ export function GameCanvas() {
       sim.debugPredictedPostHitVel = null
       sim.debugPredictedTimingErrorSec = null
       sim.debugSweetQPreview = 0
+      sim.debugExitBandPreview = 'standard'
     }
 
     sim.debugPreviewMatchesActual = false
@@ -2031,7 +2231,11 @@ export function GameCanvas() {
         sim.debugIncomingVel = { x: b.vx, y: b.vy }
       } else {
         sim.debugIncomingVel = null
-        integrateBall(b, OUTGOING_GRAVITY, dt)
+        integrateBall(
+          b,
+          OUTGOING_GRAVITY * sim.ballOutgoingGravityMul,
+          dt
+        )
       }
 
       if (sim.ballRole === 'incoming' && !sim.pitchContactResolved) {
@@ -2092,9 +2296,22 @@ export function GameCanvas() {
             sim.ballRole = 'outgoing'
             sim.ballShotTier = out.tier
             sim.ballPierceArmed = out.tier === 'perfect_full_send'
+            sim.ballExitBand = out.exitBand
+            sim.ballOutgoingGravityMul = out.outgoingGravityMul
+            sim.debugLastExitBand = out.exitBand
             sim.ballTrail = []
             sim.debugContactPoint = { x: b.x, y: b.y }
-            sim.debugContactFlash = 0.12
+            if (out.exitBand === 'moonshot') {
+              sim.debugContactFlash = 0.36
+              sim.shakeRemain = Math.max(sim.shakeRemain, SHAKE_PERFECT * 0.48)
+            } else if (out.exitBand === 'power') {
+              sim.debugContactFlash = 0.24
+              sim.shakeRemain = Math.max(sim.shakeRemain, SHAKE_PERFECT * 0.22)
+            } else if (out.exitBand === 'carry') {
+              sim.debugContactFlash = 0.15
+            } else {
+              sim.debugContactFlash = 0.12
+            }
             sim.debugOutgoingVel = { x: out.vx, y: out.vy }
             const cmp = sim.debugPredictedPostHitVel
             const predE = sim.debugPredictedTimingErrorSec
@@ -2207,6 +2424,11 @@ export function GameCanvas() {
         sim.ballRole = 'none'
         sim.idealContactTime = -1
       }
+    }
+
+    if (sim.ball == null) {
+      sim.ballOutgoingGravityMul = 1
+      sim.ballExitBand = 'standard'
     }
 
     draw()
