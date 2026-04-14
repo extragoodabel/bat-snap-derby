@@ -30,6 +30,11 @@ const BALL_R = 9
 const TARGET_R = 16
 /** Radial gap between nested rings (fraction of min(w,h)). */
 const DISC_RING_GAP_FR = 0.026
+/** Scale vs original layout: all disc radii × this; centers stay per row below. */
+const DISC_LAYOUT_SCALE = 1.2
+/** Extra left shift (px) for staggered rows after scale; front row unchanged. */
+const GALLERY_RING_SHIFT_MID_PX = 20
+const GALLERY_RING_SHIFT_BACK_PX = 40
 /** Staggered gallery: each row deeper in perspective shifts up-left (fraction of min(w,h) per step). */
 const GALLERY_DEPTH_STEP_X_FR = 0.024
 const GALLERY_DEPTH_STEP_Y_FR = 0.028
@@ -407,8 +412,9 @@ function makeSlotAngles(slotCount: number): number[] {
 
 /** Outer radii nested inward: ring[2] largest … ring[0] smallest, with gaps. */
 function layoutDiscRingRadii(minDim: number): { ro: number; ri: number }[] {
-  const gap = minDim * DISC_RING_GAP_FR
-  const R3o = minDim * 0.3
+  const s = DISC_LAYOUT_SCALE
+  const gap = minDim * DISC_RING_GAP_FR * s
+  const R3o = minDim * 0.3 * s
   const R3i = R3o * RIM_INNER_FR
   const R2o = R3i - gap
   const R2i = R2o * RIM_INNER_FR
@@ -421,7 +427,7 @@ function layoutDiscRingRadii(minDim: number): { ro: number; ri: number }[] {
   ]
 }
 
-/** Front row at anchor; deeper rows offset up-left for perspective read. */
+/** Front row at anchor; deeper rows offset up-left + extra left spread (px). */
 function layoutGalleryRingCenters(w: number, h: number): Vec2[] {
   const m = Math.min(w, h)
   const fx = w * GALLERY_FRONT_CX_FR
@@ -430,8 +436,8 @@ function layoutGalleryRingCenters(w: number, h: number): Vec2[] {
   const sy = m * GALLERY_DEPTH_STEP_Y_FR
   return [
     { x: fx, y: fy },
-    { x: fx - sx, y: fy - sy },
-    { x: fx - 2 * sx, y: fy - 2 * sy },
+    { x: fx - sx - GALLERY_RING_SHIFT_MID_PX, y: fy - sy },
+    { x: fx - 2 * sx - GALLERY_RING_SHIFT_BACK_PX, y: fy - 2 * sy },
   ]
 }
 
