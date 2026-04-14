@@ -13,34 +13,64 @@ import {
   circlesOverlap,
   closestTOnBat,
   distSqPointSegment,
+  distPointToUnitRay,
   integrateBall,
+  segmentCircleEarliestHit,
   type Vec2,
 } from './physics'
 import { useGameLoop } from './useGameLoop'
+import {
+  drawBackgroundImage,
+  drawBatSprite,
+  drawSpriteDebugOverlay,
+  drawStatueSprite,
+  loadGameSprites,
+  computeSpriteLayout,
+  getStadiumImageAspectRatio,
+  type LoadedGameSprites,
+  type SpriteLayout,
+} from './gameSprites'
 
-const ASPECT = 16 / 9
+/** Board aspect before bg-stadium loads (then replaced by the image’s width÷height). */
+const FALLBACK_BOARD_ASPECT = 16 / 9
 const GRAVITY = 700
-/** Batted balls only: balanced with exit speed so balls stay lively but arc. */
-const OUTGOING_GRAVITY = 468
+/** Batted balls only — keep moderate so balls don’t dive under the wheel. */
+const OUTGOING_GRAVITY = 392
 const RING_OMEGA = 0.55
 /** Concentric rows: index 0 = front/smallest, 2 = back/largest. */
 const RING_COUNT = 3
 const RING_TARGET_COUNTS: [number, number, number] = [7, 7, 8]
 const BALL_R = 9
-const TARGET_R = 16
-/** Radial gap between nested rings (fraction of min(w,h)). */
-const DISC_RING_GAP_FR = 0.026
-/** Scale vs original layout: all disc radii × this; centers stay per row below. */
-const DISC_LAYOUT_SCALE = 1.2
-/** Extra left shift (px) for staggered rows after scale; front row unchanged. */
-const GALLERY_RING_SHIFT_MID_PX = 20
-const GALLERY_RING_SHIFT_BACK_PX = 40
-/** Staggered gallery: each row deeper in perspective shifts up-left (fraction of min(w,h) per step). */
-const GALLERY_DEPTH_STEP_X_FR = 0.024
-const GALLERY_DEPTH_STEP_Y_FR = 0.028
-/** Front row anchor (fraction of logical w/h); lowered so batter + board read on one plane. */
-const GALLERY_FRONT_CX_FR = 0.36
-const GALLERY_FRONT_CY_FR = 0.58
+/** Stretch scales with speed / this (px/s) for motion feel. */
+const BALL_STRETCH_SPEED_REF = 720
+const BALL_STRETCH_MAX = 0.48
+/** Motion-blur streak samples behind the ball along −velocity. */
+const BALL_MOTION_BLUR_STEPS = 5
+/** Hit / draw radius for rim targets; scales with canvas so larger discs get proportional zones. */
+function targetRadiusPx(w: number, h: number): number {
+  const m = Math.min(w, h)
+  return Math.max(15, m * 0.0262)
+}
+
+/** Path-alignment: effPerp ÷ (expandedR × this) → pathAlign01 (debug / intuition). */
+const HIT_PATH_CORRIDOR_MULT = 3.6
+/** Penalize targets whose center lies behind the ray origin along flight (weak steals). */
+const HIT_BEHIND_RAY_PENALTY = 0.24
+/** Tiny tie-break: deeper ring slightly prefers winning when alignment matches (px-scale). */
+const HIT_DEPTH_SORT_BIAS = 0.045
+/** Radial gap between nested rings (fraction of min(w,h)); widened for clearer row separation. */
+const DISC_RING_GAP_FR = 0.034
+/** Global scale for all disc radii — main stage presence vs rest of scene. */
+const DISC_LAYOUT_SCALE = 1.48
+/** Extra left shift (px) for staggered rows; grows with larger layout. */
+const GALLERY_RING_SHIFT_MID_PX = 28
+const GALLERY_RING_SHIFT_BACK_PX = 52
+/** Deeper rows: more spread so each disc reads as its own layer. */
+const GALLERY_DEPTH_STEP_X_FR = 0.036
+const GALLERY_DEPTH_STEP_Y_FR = 0.044
+/** Front row anchor; CY lower on screen = field sits nearer “eye level” with raised batter. */
+const GALLERY_FRONT_CX_FR = 0.37
+const GALLERY_FRONT_CY_FR = 0.685
 
 /**
  * Fixed machine lip in screen space (does not rotate with the wheel).
@@ -113,51 +143,65 @@ const PITCH_SPEED_MAX = 1680
 /** Small vertical accel on incoming ball only (shallow arc; not full gravity). */
 const PITCH_INCOMING_AY_MIN = -140
 const PITCH_INCOMING_AY_MAX = 120
-/** Contact height along bat: upper ~half of barrel (t from pivot→tip, 1 = tip). */
-const PITCH_CONTACT_FR_MIN = 0.52
-const PITCH_CONTACT_FR_MAX = 0.94
+/** Wide strike-height variety on the bat (t pivot→tip); bias upward in pickPitchVariantParams. */
+const PITCH_CONTACT_FR_MIN = 0.48
+const PITCH_CONTACT_FR_MAX = 0.97
 /** Release point horizontal (fraction of w); left of plate for mostly +x travel. */
 const PITCH_MOUND_X_FR = 0.31
-/** Tiny start Y offset vs target (px-ish scale via minDim) for slight plane variety. */
-const PITCH_RELEASE_DY_FR = 0.018
+/** Tiny start Y vs target (px-ish via minDim); slight upward bias = ball approaches from above more. */
+const PITCH_RELEASE_DY_FR = 0.014
+const PITCH_RELEASE_DY_BIAS_FR = -0.0065
 /** Sweet spot: upper-mid barrel (t along bat); radius as fraction of bat length. */
 const SWEET_SPOT_T = 0.74
-const SWEET_SPOT_RADIUS_FR = 0.2
+const SWEET_SPOT_RADIUS_FR = 0.28
 /** Auto pitch if idle this long (s) with no ball in play. */
 const AUTO_PITCH_IDLE_SEC = 5
-/** Generous plate + upper-barrel contact read. */
-const CONTACT_ZONE_R = 142
+/** Very forgiving plate reach — goal: more hits than empty swings. */
+const CONTACT_ZONE_R = 248
+/** Allow lower barrel / “choked up” meets; still skips pure handle. */
+const CONTACT_BARREL_T_MIN = 0.28
 /**
- * |timingError| ≤ PERFECT → best tier; ≤ GOOD → solid hit; ≤ POOR → weak; else dribble;
- * beyond MISS → no batted ball (passed through).
+ * Allow contact while the bat sweeps through this angular window around launch (rad).
+ * Stops “one vertical instant” reads; early/late on the arc can still connect.
  */
-const TIMING_PERFECT_SEC = 0.048
-const TIMING_GOOD_SEC = 0.13
-const TIMING_POOR_SEC = 0.24
-const TIMING_MISS_SEC = 0.44
+const CONTACT_THETA_EARLY = THETA_LAUNCH + 0.78
+const CONTACT_THETA_LATE = THETA_LAUNCH - 1.05
+/** |now − ideal contact| below this paints the incoming ball / plate as “ripe”. */
+const TIMING_RIPE_WINDOW_SEC = 0.12
+/**
+ * |timingError| ≤ PERFECT → best tier; ≤ GOOD → solid hit; ≤ POOR → weak; else dribble.
+ * (No timing-only whiff: awful timing maps to dribble / very weak contact.)
+ */
+const TIMING_PERFECT_SEC = 0.056
+const TIMING_GOOD_SEC = 0.17
+const TIMING_POOR_SEC = 0.34
 /** Outgoing exit-speed band (px/s); pullback sets band, timing/barrel trim — not stacked into mush. */
 const OUT_SPEED_MIN = 920
 const OUT_SPEED_MAX = 2480
 const OUT_SPEED_DRIBBLE = 620
 /** Fine trim on top of aim-point steering (sweet spot steadies the barrel). */
-const TIMING_YAW_MAX_RAD = 0.42
-/** Pullback adds launch loft on top of aim-based plane. */
-const PULLBACK_LOFT_MAX_RAD = 0.44
-/** Small constant loft so fair balls don’t knife into the dirt. */
-const FAIR_CONTACT_BASE_LOFT_RAD = 0.055
-const DRIBBLE_BASE_LOFT_RAD = 0.032
-/** Off-barrel wobble — keep smaller so good contact feels crisp, not slot-like. */
-const OFF_BARREL_ANGLE_SCATTER_RAD = 0.2
+const TIMING_YAW_MAX_RAD = 0.52
+/** Pullback loft scale (most power → speed; loft capped small). */
+const PULLBACK_LOFT_MAX_RAD = 0.36
+const PULLBACK_LOFT_STRENGTH = 0.3
+/** Neutral launch biased up — combats chronically low refAngle from plate→board geometry. */
+const FAIR_CONTACT_BASE_LOFT_RAD = 0.082
+const DRIBBLE_BASE_LOFT_RAD = 0.052
+/** Extra radians tilted into the disc band (all contacted balls; dribble gets a fraction). */
+const PLAYFIELD_LAUNCH_BIAS_RAD = 0.048
+const PLAYFIELD_LAUNCH_BIAS_DRIBBLE_MUL = 0.55
+/** Imperfect-barrel yaw; kept moderate so variance doesn’t dump trajectories low. */
+const OFF_BARREL_ANGLE_SCATTER_RAD = 0.22
 
-/** Exit reward: only high combined pullback × timing × sweet unlocks moonshot. */
-const EXIT_SCORE_MOONSHOT = 0.885
-const EXIT_SCORE_POWER = 0.765
+/** Exit reward — slightly easier carry/power so more balls “play above” the lip. */
+const EXIT_SCORE_MOONSHOT = 0.898
+const EXIT_SCORE_POWER = 0.772
 const EXIT_SCORE_CARRY = 0.628
-/** Batter pivot height (fraction of canvas h); higher on screen = smaller fraction. */
-const BAT_PIVOT_X_FR = 0.88
-const BAT_PIVOT_Y_FR = 0.74
-/** Past this offset from plate center X, pitch is “gone” if unresolved. */
-const BALL_PAST_PLATE_DX = 92
+/** Batter pivot; Y smaller fraction = higher on screen, aligned with lowered gallery. */
+const BAT_PIVOT_X_FR = 0.875
+const BAT_PIVOT_Y_FR = 0.635
+/** Past this offset from plate X, pitch is gone (extra px = more time to connect). */
+const BALL_PAST_PLATE_DX = 128
 
 const GRAB_THRESH_PX = 52
 const GRAB_THRESH_SQ = GRAB_THRESH_PX * GRAB_THRESH_PX
@@ -183,6 +227,10 @@ type PowerTier =
 
 /** Top-end batted-ball reward ladder (separate from score tier / pierce). */
 type ExitRewardBand = 'standard' | 'carry' | 'power' | 'moonshot'
+
+type VerticalShotBand = 'LOW' | 'PLAYFIELD' | 'HIGH'
+
+type OutcomeClass = 'ordinary' | 'strong' | 'elite'
 
 type ContactQualityBucket =
   | 'miss'
@@ -305,6 +353,8 @@ type Sim = {
   dpr: number
   pivot: Vec2
   batLen: number
+  /** Populated when sprite assets load; drives pivot / batLen from art. */
+  spriteLayout: SpriteLayout | null
   /** Three staggered rows in perspective; [0] front/smallest … [2] back/largest. */
   rings: DiscWheelRing[]
   /** True when every target in the exposed (above-occluder) region has wasTriggered (all rings). */
@@ -341,6 +391,8 @@ type Sim = {
   ballShotTier: PowerTier
   /** Perfect full send: first hit pierces (ball survives once). */
   ballPierceArmed: boolean
+  /** After pierce, only rings with index ≥ this may register the next hit (deeper rows). */
+  ballNextHitMinRing: number | null
   /** Active outgoing: reward band from last contact (trail / labels). */
   ballExitBand: ExitRewardBand
   /** Outgoing gravity scale (elite = gentler drop for carry). */
@@ -395,6 +447,14 @@ type Sim = {
   debugAutoPitch: boolean
   debugExitBandPreview: ExitRewardBand
   debugLastExitBand: ExitRewardBand
+  debugHitCandidateCount: number
+  debugHitWinnerLine: string
+  /** Last outgoing collision pass: top candidates + scores (debug HUD). */
+  debugHitCandidateLines: string[]
+  debugVerticalBandPreview: VerticalShotBand | '—'
+  debugVerticalBandAtContact: VerticalShotBand | '—'
+  debugOutcomeClassPreview: OutcomeClass | '—'
+  debugOutcomeClassAtContact: OutcomeClass | '—'
 }
 
 function ringMidRadius(Ro: number): number {
@@ -414,7 +474,8 @@ function makeSlotAngles(slotCount: number): number[] {
 function layoutDiscRingRadii(minDim: number): { ro: number; ri: number }[] {
   const s = DISC_LAYOUT_SCALE
   const gap = minDim * DISC_RING_GAP_FR * s
-  const R3o = minDim * 0.3 * s
+  /** Back (largest) ring — slightly larger base fr so scale-up fills the frame. */
+  const R3o = minDim * 0.315 * s
   const R3i = R3o * RIM_INNER_FR
   const R2o = R3i - gap
   const R2i = R2o * RIM_INNER_FR
@@ -630,7 +691,8 @@ function drawRingRowTargets(
   ctx: CanvasRenderingContext2D,
   ring: DiscWheelRing,
   ringIdx: number,
-  revealLabels: boolean
+  revealLabels: boolean,
+  targetR: number
 ): void {
   const Rmid = ringMidFromDiscRing(ring)
   const { x: cx, y: cy } = ring.center
@@ -662,7 +724,7 @@ function drawRingRowTargets(
     const pal = RING_TARGET_PALETTE[ringIdx] ?? RING_TARGET_PALETTE[0]
 
     ctx.beginPath()
-    ctx.arc(pt.x, pt.y, TARGET_R, 0, Math.PI * 2)
+    ctx.arc(pt.x, pt.y, targetR, 0, Math.PI * 2)
     if (!upper) {
       ctx.fillStyle = 'rgba(72, 78, 92, 0.38)'
       ctx.strokeStyle = 'rgba(55, 60, 72, 0.55)'
@@ -717,11 +779,18 @@ export type DevDrawOptions = {
   revealHiddenLayers: boolean
   /** Top-left launcher / physics readout. */
   showLauncherDebugHud: boolean
+  /** Pivot dot, bat AABB, θ label (and throttled console θ). */
+  showSpriteDebug: boolean
+  /**
+   * Fill logical viewport red before the stadium bg: transparent regions in the
+   * background PNG show red; confirms alpha is compositing (not a solid underlay).
+   */
+  transparencyUnderlayTest: boolean
 }
 
 function createSim(w: number, h: number): Sim {
   const pivot: Vec2 = { x: w * BAT_PIVOT_X_FR, y: h * BAT_PIVOT_Y_FR }
-  const batLen = Math.min(w, h) * 0.2
+  const batLen = Math.min(w, h) * 0.216
   const rings = createDiscRingsForLayout(w, h)
   return {
     w,
@@ -729,6 +798,7 @@ function createSim(w: number, h: number): Sim {
     dpr: 1,
     pivot,
     batLen,
+    spriteLayout: null,
     rings,
     debugAllTargetsTriggered: false,
     ball: null,
@@ -750,6 +820,7 @@ function createSim(w: number, h: number): Sim {
     powerTierRelease: 'normal',
     ballShotTier: 'normal',
     ballPierceArmed: false,
+    ballNextHitMinRing: null,
     ballExitBand: 'standard',
     ballOutgoingGravityMul: 1,
     score: 0,
@@ -790,14 +861,34 @@ function createSim(w: number, h: number): Sim {
     debugAutoPitch: false,
     debugExitBandPreview: 'standard',
     debugLastExitBand: 'standard',
+    debugHitCandidateCount: 0,
+    debugHitWinnerLine: '',
+    debugHitCandidateLines: [],
+    debugVerticalBandPreview: '—',
+    debugVerticalBandAtContact: '—',
+    debugOutcomeClassPreview: '—',
+    debugOutcomeClassAtContact: '—',
   }
 }
 
-function layoutSim(sim: Sim, w: number, h: number): void {
+function layoutSim(
+  sim: Sim,
+  w: number,
+  h: number,
+  sprites: LoadedGameSprites | null
+): void {
   sim.w = w
   sim.h = h
-  sim.pivot = { x: w * BAT_PIVOT_X_FR, y: h * BAT_PIVOT_Y_FR }
-  sim.batLen = Math.min(w, h) * 0.2
+  if (sprites) {
+    const sl = computeSpriteLayout(w, h, sprites.statue, sprites.bat)
+    sim.spriteLayout = sl
+    sim.pivot = sl.pivot
+    sim.batLen = sl.batLen
+  } else {
+    sim.spriteLayout = null
+    sim.pivot = { x: w * BAT_PIVOT_X_FR, y: h * BAT_PIVOT_Y_FR }
+    sim.batLen = Math.min(w, h) * 0.216
+  }
   syncGalleryLayout(sim, w, h)
 }
 
@@ -856,7 +947,6 @@ function galleryPlayBounds(sim: Sim): {
 
 function classifyContactBucket(timingErrorSec: number): ContactQualityBucket {
   const ae = Math.abs(timingErrorSec)
-  if (ae > TIMING_MISS_SEC) return 'miss'
   if (ae > TIMING_POOR_SEC) return 'dribble'
   if (ae > TIMING_GOOD_SEC) return timingErrorSec < 0 ? 'poor_early' : 'poor_late'
   if (ae > TIMING_PERFECT_SEC)
@@ -866,8 +956,8 @@ function classifyContactBucket(timingErrorSec: number): ContactQualityBucket {
 
 function contactQuality01(timingErrorSec: number): number {
   const ae = Math.abs(timingErrorSec)
-  /** Softer floor: “close” swings stay energetic; only poor timing really bleeds power. */
-  return clamp(1 - ae / TIMING_GOOD_SEC, 0.4, 1)
+  /** High floor: mediocre timing still feels like baseball, not a dud. */
+  return clamp(1 - ae / TIMING_GOOD_SEC, 0.58, 1)
 }
 
 function powerTierFromTimingAbs(absErr: number): PowerTier {
@@ -903,15 +993,33 @@ function pickPitchVariantParams(sim: Sim): void {
   const a1 = pitchVariant01(n, 2)
   const a2 = pitchVariant01(n, 3)
   const a3 = pitchVariant01(n, 4)
-  sim.pitchContactFracT =
+  const a5 = pitchVariant01(n, 5)
+  const a6 = pitchVariant01(n, 6)
+  /** Rich height variety + upward bias; second harmonic avoids “same pitch every time”. */
+  const heightU = clamp(
+    0.64 +
+      0.32 * Math.sin(a0 * Math.PI * 2) +
+      0.14 * Math.sin(a0 * 7.21 + n * 0.37),
+    0,
+    1
+  )
+  const spanT = PITCH_CONTACT_FR_MAX - PITCH_CONTACT_FR_MIN
+  sim.pitchContactFracT = clamp(
     PITCH_CONTACT_FR_MIN +
-    a0 * (PITCH_CONTACT_FR_MAX - PITCH_CONTACT_FR_MIN)
+      heightU * spanT +
+      (a5 - 0.5) * 0.1 +
+      (a6 - 0.5) * 0.045,
+    PITCH_CONTACT_FR_MIN,
+    PITCH_CONTACT_FR_MAX
+  )
   sim.pitchSpeedNominal =
     PITCH_SPEED_MIN + a1 * (PITCH_SPEED_MAX - PITCH_SPEED_MIN)
-  sim.pitchIncomingAy =
-    PITCH_INCOMING_AY_MIN +
-    a2 * (PITCH_INCOMING_AY_MAX - PITCH_INCOMING_AY_MIN)
-  sim.pitchReleaseDyPx = (a3 - 0.5) * 2 * PITCH_RELEASE_DY_FR * m
+  const aySpan = PITCH_INCOMING_AY_MAX - PITCH_INCOMING_AY_MIN
+  const ayRaw = PITCH_INCOMING_AY_MIN + a2 * aySpan
+  /** Strong bias to hang / ride vs dive at the hands. */
+  sim.pitchIncomingAy = ayRaw * 0.45 + PITCH_INCOMING_AY_MIN * 0.55
+  sim.pitchReleaseDyPx =
+    (a3 - 0.5) * 1.45 * PITCH_RELEASE_DY_FR * m + PITCH_RELEASE_DY_BIAS_FR * m
 }
 
 function combinedTransfer(
@@ -919,9 +1027,9 @@ function combinedTransfer(
   sweetQu: number,
   pullbackU: number
 ): number {
-  const sw = 0.38 + 0.62 * sweetQu
-  const pu = 0.48 + 0.52 * pullbackU
-  return clamp(0.28 + 0.72 * quality * sw * pu, 0, 1)
+  const sw = 0.36 + 0.64 * sweetQu
+  const pu = 0.46 + 0.54 * pullbackU
+  return clamp(0.32 + 0.68 * quality * sw * pu, 0, 1)
 }
 
 function powerTierFromContact(transfer: number, absErr: number): PowerTier {
@@ -941,14 +1049,14 @@ function timingSteerForBoard(errSec: number): number {
   const g = TIMING_GOOD_SEC
   const a = Math.abs(errSec)
   if (a <= p) {
-    return (errSec / Math.max(p, 1e-6)) * 0.17
+    return (errSec / Math.max(p, 1e-6)) * 0.22
   }
   const sign = Math.sign(errSec)
   const past = a - p
   const span = Math.max(g - p, 1e-6)
   const u = clamp(past / span, 0, 1)
   const u2 = u * u
-  return sign * (0.17 + u2 * 0.93)
+  return sign * (0.22 + u2 * 1.05)
 }
 
 function classifyExitRewardBand(
@@ -971,21 +1079,21 @@ function classifyExitRewardBand(
 
   if (
     score >= EXIT_SCORE_MOONSHOT &&
-    pu >= 0.83 &&
-    quality >= 0.85 &&
-    sweetQu >= 0.66
+    pu >= 0.88 &&
+    quality >= 0.88 &&
+    sweetQu >= 0.72
   ) {
     return 'moonshot'
   }
   if (
     score >= EXIT_SCORE_POWER &&
-    pu >= 0.68 &&
-    quality >= 0.7 &&
-    sweetQu >= 0.32
+    pu >= 0.76 &&
+    quality >= 0.74 &&
+    sweetQu >= 0.38
   ) {
     return 'power'
   }
-  if (score >= EXIT_SCORE_CARRY && pu >= 0.46 && quality >= 0.48) {
+  if (score >= EXIT_SCORE_CARRY && pu >= 0.52 && quality >= 0.55) {
     return 'carry'
   }
   return 'standard'
@@ -998,20 +1106,57 @@ function exitBandBonuses(band: ExitRewardBand): {
 } {
   switch (band) {
     case 'moonshot':
-      return { loftRad: 0.44, speedMul: 1.24, gravityMul: 0.62 }
+      return { loftRad: 0.2, speedMul: 1.34, gravityMul: 0.62 }
     case 'power':
-      return { loftRad: 0.22, speedMul: 1.1, gravityMul: 0.76 }
+      return { loftRad: 0.075, speedMul: 1.14, gravityMul: 0.78 }
     case 'carry':
-      return { loftRad: 0.11, speedMul: 1.036, gravityMul: 0.88 }
+      return { loftRad: 0.048, speedMul: 1.022, gravityMul: 0.88 }
     default:
-      return { loftRad: 0, speedMul: 1, gravityMul: 1 }
+      return { loftRad: 0.042, speedMul: 1.03, gravityMul: 0.86 }
   }
 }
 
+/** Sample Y when ball crosses gallery plane (or fixed t) vs disc vertical bounds. */
+function verticalOutcomeBandAtGalleryCrossing(
+  sim: Sim,
+  fromX: number,
+  fromY: number,
+  vx: number,
+  vy: number,
+  gEff: number
+): VerticalShotBand {
+  const b = galleryPlayBounds(sim)
+  const yTopField = b.cy - b.halfH * 0.96
+  const yBotField = b.cy + b.halfH * 0.9
+  let tSample = 0.38
+  if (vx < -45) {
+    const tX = (b.cx - fromX) / vx
+    if (tX > 0.06 && tX < 0.88) tSample = tX
+  }
+  const yAt = fromY + vy * tSample + 0.5 * gEff * tSample * tSample
+  if (yAt < yTopField - 32) return 'HIGH'
+  if (yAt > yBotField + 52) return 'LOW'
+  return 'PLAYFIELD'
+}
+
+function classifyOutcomeClass(exitBand: ExitRewardBand): OutcomeClass {
+  if (exitBand === 'moonshot') return 'elite'
+  if (exitBand === 'power' || exitBand === 'carry') return 'strong'
+  return 'ordinary'
+}
+
+/** −1 = full charge toward left, +1 toward right (rest ≈ 0). Player agency on field aim. */
+function chargePullSteer01(theta: number): number {
+  return clamp((theta - THETA_REST) / (Math.PI * 0.5), -1, 1)
+}
+
+function chargeThetaForAimPreview(sim: Sim): number {
+  return sim.phase === 'charging' ? sim.theta : sim.thetaRelease
+}
+
 /**
- * Baseball-style contact: launch angle + exit speed from timing (steer), sweet-spot (clean/variance),
- * and pullback (force band). Same function drives live hit and dotted preview.
- * Top exit bands add clean loft + carry (moonshot can clear the board).
+ * Baseball-style contact: timing + sweet-spot + pullback + **charge angle** + per-pitch spread.
+ * Same function drives live hit and dotted preview.
  */
 function battedBallOutcome(
   sim: Sim,
@@ -1019,7 +1164,11 @@ function battedBallOutcome(
   fromX: number,
   fromY: number,
   pullbackU: number,
-  sweetQu: number
+  sweetQu: number,
+  /** Pivot→tip contact parameter on bat (live or planned); shapes jam vs pop. */
+  contactAlongT: number,
+  /** Bat angle at release (or current θ while charging for preview). */
+  chargeTheta: number
 ): {
   vx: number
   vy: number
@@ -1030,6 +1179,8 @@ function battedBallOutcome(
   transferEff: number
   exitBand: ExitRewardBand
   outgoingGravityMul: number
+  verticalBand?: VerticalShotBand
+  outcomeClass?: OutcomeClass
 } {
   const bucket = classifyContactBucket(timingErrorSec)
   if (bucket === 'miss') {
@@ -1050,28 +1201,43 @@ function battedBallOutcome(
 
   const b = galleryPlayBounds(sim)
   const tSteer = timingSteerForBoard(timingErrorSec)
+  const ch = chargePullSteer01(chargeTheta)
+  const vHash = pitchVariant01(sim.pitchSeq, 11)
+  const hHash = pitchVariant01(sim.pitchSeq + 5, 12)
 
   /**
-   * Timing steers a concrete aim spot on the wheel (early/late = sides, quality = row height).
-   * Player sees cause → effect like barrel meeting pitch, not a hidden lottery vector.
+   * Vertical funnel: larger frac → higher aim on the board (stay in target band).
+   * Biased upward; charge/hash penalties are mild so shots don’t default under the lip.
    */
-  const aimTx = b.cx + tSteer * b.halfW * 0.9
+  const playFracAnchor = 0.53 + 0.065 * quality * sweetQu
+  const pullPoor =
+    (bucket === 'dribble' ? 0.32 : 0.19) *
+    (1 - quality) *
+    (1 - 0.16 * sweetQu)
   const verticalFrac = clamp(
-    0.2 + 0.48 * (1 - quality) - 0.07 * sweetQu + tSteer * tSteer * 0.04,
-    0.08,
-    0.62
+    playFracAnchor -
+      pullPoor +
+      tSteer * tSteer * 0.028 +
+      (vHash - 0.5) * 0.085 * (0.5 + 0.5 * quality) +
+      ch * -0.016 +
+      0.045,
+    0.32,
+    0.66
   )
+  const aimTx =
+    b.cx +
+    tSteer * b.halfW * 0.94 +
+    ch * b.halfW * 0.44 +
+    (hHash - 0.5) * b.halfW * 0.24 * (0.5 + 0.5 * sweetQu)
   const aimTy = b.cy - b.halfH * verticalFrac
 
   const rdx = aimTx - fromX
   const rdy = aimTy - fromY
   const refAngle = Math.atan2(rdy, rdx)
 
-  /** Sweet-spot steadies fine yaw; doesn’t erase timing steer (aim point already did the work). */
   const aimStiffness = 0.38 + 0.62 * sweetQu
   const trimYaw = tSteer * TIMING_YAW_MAX_RAD * aimStiffness
 
-  /** Off-barrel: small deterministic wobble only when q is low. */
   const jitter =
     Math.sin(
       timingErrorSec * 103.417 + sweetQu * 27.913 + pullbackU * 8.771
@@ -1079,15 +1245,38 @@ function battedBallOutcome(
     OFF_BARREL_ANGLE_SCATTER_RAD *
     (1 - sweetQu)
 
-  /** Pullback: power into the ball + a bit more sky when loaded. */
+  /** Pullback → mostly speed via band; loft is a small, capped add (no full-power sky default). */
   const pu = clamp(pullbackU, 0, 1)
-  const pullLoftRaw =
-    (pu - 0.06) * PULLBACK_LOFT_MAX_RAD * (0.5 + 0.5 * sweetQu)
-  const pullLoft = clamp(pullLoftRaw, -0.04, PULLBACK_LOFT_MAX_RAD * 0.88)
+  const pullLoft = clamp(
+    (pu - 0.1) *
+      PULLBACK_LOFT_MAX_RAD *
+      PULLBACK_LOFT_STRENGTH *
+      (0.42 + 0.58 * sweetQu),
+    -0.012,
+    0.13
+  )
 
   const baseLoft =
     bucket === 'dribble' ? DRIBBLE_BASE_LOFT_RAD : FAIR_CONTACT_BASE_LOFT_RAD
-  const baseAngle = refAngle + trimYaw + jitter + pullLoft + baseLoft
+  const midBarrelT = 0.62
+  const barrelOff = clamp(contactAlongT - midBarrelT, -0.36, 0.36)
+  const barrelShapeMul = bucket === 'dribble' ? 0.52 : 1
+  /** Lower on barrel → jam lean (softer than before so good barrel isn’t always “off low”). */
+  const barrelLoftRad = barrelShapeMul * clamp(barrelOff * 0.1, -0.048, 0.12)
+  const cleanLiftRad =
+    bucket === 'dribble' ? 0 : 0.032 * quality * (0.4 + 0.6 * sweetQu)
+  const playfieldBiasRad =
+    PLAYFIELD_LAUNCH_BIAS_RAD *
+    (bucket === 'dribble' ? PLAYFIELD_LAUNCH_BIAS_DRIBBLE_MUL : 1)
+  const baseAngle =
+    refAngle +
+    trimYaw +
+    jitter +
+    pullLoft +
+    baseLoft +
+    barrelLoftRad +
+    cleanLiftRad +
+    playfieldBiasRad
 
   let speed: number
   if (bucket === 'dribble') {
@@ -1098,11 +1287,10 @@ function battedBallOutcome(
       (0.65 + 0.35 * sweetQu)
     speed = clamp(v0, 340, OUT_SPEED_MIN * 0.88)
   } else {
-    const pullCore = Math.pow(pu, 0.62)
+    const pullCore = Math.pow(pu, 0.58)
     const speedBand = OUT_SPEED_MIN + pullCore * (OUT_SPEED_MAX - OUT_SPEED_MIN)
-    /** High floors so “I put a swing on it” always feels like baseball, not a dying lob. */
-    const timingEff = 0.58 + 0.42 * quality
-    const barrelEff = 0.72 + 0.28 * sweetQu
+    const timingEff = 0.6 + 0.4 * quality
+    const barrelEff = 0.74 + 0.26 * sweetQu
     speed = speedBand * timingEff * barrelEff
     speed = clamp(speed, 520, OUT_SPEED_MAX)
   }
@@ -1113,11 +1301,11 @@ function battedBallOutcome(
   let speedOut = speed * bon.speedMul
   const maxSp =
     exitBand === 'moonshot'
-      ? OUT_SPEED_MAX * 1.38
+      ? OUT_SPEED_MAX * 1.36
       : exitBand === 'power'
-        ? OUT_SPEED_MAX * 1.16
+        ? OUT_SPEED_MAX * 1.12
         : exitBand === 'carry'
-          ? OUT_SPEED_MAX * 1.05
+          ? OUT_SPEED_MAX * 1.04
           : OUT_SPEED_MAX
   speedOut = bucket === 'dribble' ? speed : clamp(speedOut, 420, maxSp)
 
@@ -1131,9 +1319,9 @@ function battedBallOutcome(
 
   if (exitBand === 'moonshot' && bucket !== 'dribble') {
     if (
-      Math.abs(timingErrorSec) <= TIMING_GOOD_SEC * 0.38 &&
-      sweetQu >= 0.52 &&
-      pu >= 0.78
+      Math.abs(timingErrorSec) <= TIMING_GOOD_SEC * 0.36 &&
+      sweetQu >= 0.55 &&
+      pu >= 0.84
     ) {
       tier = 'perfect_full_send'
     } else if (tier !== 'perfect_full_send') {
@@ -1142,6 +1330,17 @@ function battedBallOutcome(
   } else if (exitBand === 'power' && tier === 'normal' && quality >= 0.62) {
     tier = 'strong'
   }
+
+  const gEff = OUTGOING_GRAVITY * bon.gravityMul
+  const verticalBand = verticalOutcomeBandAtGalleryCrossing(
+    sim,
+    fromX,
+    fromY,
+    vx,
+    vy,
+    gEff
+  )
+  const outcomeClass = classifyOutcomeClass(exitBand)
 
   return {
     vx,
@@ -1153,6 +1352,8 @@ function battedBallOutcome(
     transferEff: transfer,
     exitBand,
     outgoingGravityMul: bon.gravityMul,
+    verticalBand,
+    outcomeClass,
   }
 }
 
@@ -1184,9 +1385,19 @@ function predictNextBatCrossTime(sim: Sim): number | null {
   return null
 }
 
-/** timingError = batCross − idealBallArrival (negative = early barrel). */
+/**
+ * timingError for preview: after the bat has crossed launch, use live sim time vs ideal
+ * (matches generous swing-window contact). Before cross, keep predicted cross vs ideal.
+ */
 function predictTimingErrorForPreview(sim: Sim): number | null {
   if (sim.idealContactTime <= 0) return null
+  if (
+    sim.ballRole === 'incoming' &&
+    sim.batCrossLaunchTime != null &&
+    (sim.phase === 'swing' || sim.phase === 'recovery')
+  ) {
+    return sim.simTime - sim.idealContactTime
+  }
   const tBat = predictNextBatCrossTime(sim)
   if (tBat == null) return null
   return tBat - sim.idealContactTime
@@ -1300,7 +1511,16 @@ function drawPostHitTrajectoryPreview(ctx: CanvasRenderingContext2D, sim: Sim): 
   const pullbackU = sim.phase === 'charging' ? sim.pCurrent : sim.pRelease
   const ix = pitchPlannedContactPoint(sim)
   const sweetQ = sweetSpotQuFromT(sim.pitchContactFracT)
-  const out = battedBallOutcome(sim, err, ix.x, ix.y, pullbackU, sweetQ)
+  const out = battedBallOutcome(
+    sim,
+    err,
+    ix.x,
+    ix.y,
+    pullbackU,
+    sweetQ,
+    sim.pitchContactFracT,
+    chargeThetaForAimPreview(sim)
+  )
   if (out.bucket === 'miss') return
 
   const vx0 = out.vx
@@ -1341,6 +1561,108 @@ function drawPostHitTrajectoryPreview(ctx: CanvasRenderingContext2D, sim: Sim): 
   ctx.restore()
 }
 
+/**
+ * Always-on (non-debug) cues: contact disk, sweet band, pitch corridor, swing arc window,
+ * and a “ripe” hint when the ball is near ideal contact time.
+ */
+function drawHittingGuidance(ctx: CanvasRenderingContext2D, sim: Sim): void {
+  if (sim.idealContactTime <= 0) return
+  const ix = pitchPlannedContactPoint(sim)
+  const p = sim.pivot
+  const L = sim.batLen
+  const moundX = sim.w * PITCH_MOUND_X_FR
+  const moundY = ix.y + sim.pitchReleaseDyPx
+
+  ctx.save()
+
+  if (sim.ballRole === 'incoming' || sim.phase === 'charging') {
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)'
+    ctx.lineWidth = 16
+    ctx.lineCap = 'round'
+    ctx.beginPath()
+    ctx.moveTo(moundX, moundY)
+    ctx.lineTo(ix.x, ix.y)
+    ctx.stroke()
+    ctx.strokeStyle = 'rgba(190, 215, 255, 0.2)'
+    ctx.lineWidth = 2
+    ctx.beginPath()
+    ctx.moveTo(moundX, moundY)
+    ctx.lineTo(ix.x, ix.y)
+    ctx.stroke()
+  }
+
+  const dtToIdeal = sim.idealContactTime - sim.simTime
+  const ripe =
+    sim.ballRole === 'incoming' &&
+    Math.abs(dtToIdeal) < TIMING_RIPE_WINDOW_SEC
+  ctx.setLineDash([7, 6])
+  ctx.strokeStyle = ripe
+    ? 'rgba(255, 215, 110, 0.48)'
+    : 'rgba(150, 210, 255, 0.26)'
+  ctx.lineWidth = ripe ? 2.75 : 1.85
+  ctx.beginPath()
+  ctx.arc(ix.x, ix.y, CONTACT_ZONE_R * 0.9, 0, Math.PI * 2)
+  ctx.stroke()
+  ctx.setLineDash([])
+
+  const barLo = batPointAlong(p, L, THETA_LAUNCH, PITCH_CONTACT_FR_MIN)
+  const barHi = batPointAlong(p, L, THETA_LAUNCH, PITCH_CONTACT_FR_MAX)
+  ctx.strokeStyle = 'rgba(70, 78, 92, 0.5)'
+  ctx.lineWidth = 6.5
+  ctx.lineCap = 'round'
+  ctx.beginPath()
+  ctx.moveTo(barLo.x, barLo.y)
+  ctx.lineTo(barHi.x, barHi.y)
+  ctx.stroke()
+
+  const swLo = batPointAlong(
+    p,
+    L,
+    THETA_LAUNCH,
+    SWEET_SPOT_T - SWEET_SPOT_RADIUS_FR * 0.88
+  )
+  const swHi = batPointAlong(
+    p,
+    L,
+    THETA_LAUNCH,
+    SWEET_SPOT_T + SWEET_SPOT_RADIUS_FR * 0.88
+  )
+  ctx.strokeStyle = 'rgba(70, 255, 160, 0.78)'
+  ctx.lineWidth = 8.5
+  ctx.beginPath()
+  ctx.moveTo(swLo.x, swLo.y)
+  ctx.lineTo(swHi.x, swHi.y)
+  ctx.stroke()
+
+  const arcSteps = 16
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)'
+  ctx.lineWidth = 9
+  ctx.lineCap = 'round'
+  ctx.beginPath()
+  for (let i = 0; i <= arcSteps; i++) {
+    const u = i / arcSteps
+    const a =
+      CONTACT_THETA_LATE + u * (CONTACT_THETA_EARLY - CONTACT_THETA_LATE)
+    const x = p.x + L * 0.84 * Math.cos(a)
+    const y = p.y + L * 0.84 * Math.sin(a)
+    if (i === 0) ctx.moveTo(x, y)
+    else ctx.lineTo(x, y)
+  }
+  ctx.stroke()
+
+  if (ripe && sim.ball && sim.ballRole === 'incoming') {
+    ctx.strokeStyle = 'rgba(255, 195, 80, 0.62)'
+    ctx.lineWidth = 2
+    ctx.setLineDash([4, 4])
+    ctx.beginPath()
+    ctx.arc(sim.ball.x, sim.ball.y, sim.ball.r + 11, 0, Math.PI * 2)
+    ctx.stroke()
+    ctx.setLineDash([])
+  }
+
+  ctx.restore()
+}
+
 /** Legal aim arc while charging (direction / angle range). */
 function drawChargeWindowArcWhite(
   ctx: CanvasRenderingContext2D,
@@ -1369,6 +1691,170 @@ function angularDiff(a: number, b: number): number {
   while (d > Math.PI) d -= Math.PI * 2
   while (d < -Math.PI) d += Math.PI * 2
   return Math.abs(d)
+}
+
+/** 0 = front/smallest (nearest), 2 = back/largest (farthest). */
+function ringRowDepth(ringIndex: number): number {
+  return ringIndex
+}
+
+/**
+ * Fake depth on tilted wheel for tie-breaks (consistent per rim angle).
+ * Not physical 3D — stable ordering around the disc.
+ */
+function localTargetDepthOnWheel(worldAngle: number): number {
+  return 0.5 + 0.5 * Math.sin(worldAngle)
+}
+
+type TargetHitCandidate = {
+  ringIdx: number
+  slotIdx: number
+  tHit: number
+  rowDepth: number
+  localDepth: number
+  perpDist: number
+  alongRay: number
+  effPerp: number
+  effSort: number
+  pathAlign01: number
+  depthScore: number
+  combinedScore: number
+}
+
+function flightUnitVector(b: Ball, x0: number, y0: number, x1: number, y1: number): {
+  ux: number
+  uy: number
+} {
+  const sp = Math.hypot(b.vx, b.vy)
+  if (sp > 45) {
+    return { ux: b.vx / sp, uy: b.vy / sp }
+  }
+  const dx = x1 - x0
+  const dy = y1 - y0
+  const sl = Math.hypot(dx, dy)
+  if (sl > 1e-4) {
+    return { ux: dx / sl, uy: dy / sl }
+  }
+  return { ux: 1, uy: 0 }
+}
+
+/**
+ * One shot → one primary target: gather segment overlaps, then pick the intercept that
+ * best matches the ball’s flight corridor (perp distance to velocity ray), not merely
+ * earliest screen-space entry — reduces “right-edge vacuum” steals from weak alignment.
+ */
+function resolveSingleTargetHit(
+  sim: Sim,
+  b: Ball,
+  dt: number
+): { ring: number; idx: number } | null {
+  const x0 = b.x - b.vx * dt
+  const y0 = b.y - b.vy * dt
+  const x1 = b.x
+  const y1 = b.y
+  const tR = targetRadiusPx(sim.w, sim.h)
+  const expandedR = tR + b.r
+  const minRing = sim.ballNextHitMinRing ?? 0
+  const { ux, uy } = flightUnitVector(b, x0, y0, x1, y1)
+
+  const candidates: TargetHitCandidate[] = []
+
+  for (let r = minRing; r < RING_COUNT; r++) {
+    const ring = sim.rings[r]
+    const Rmid = ringMidFromDiscRing(ring)
+    const rowDepth = ringRowDepth(r)
+    for (let i = 0; i < ring.targetSlots.length; i++) {
+      const slot = ring.targetSlots[i]
+      if (!slot.isActive) continue
+      const worldAngle = ring.rotation + ring.slotAngles[i]
+      if (!targetIsExposedAboveOccluder(ring, Rmid, worldAngle)) continue
+
+      const tp = ringScreenPoint(
+        ring.center.x,
+        ring.center.y,
+        DISC_SX,
+        Rmid,
+        worldAngle
+      )
+
+      let tHit = segmentCircleEarliestHit(
+        x0,
+        y0,
+        x1,
+        y1,
+        tp.x,
+        tp.y,
+        expandedR
+      )
+      if (
+        tHit == null &&
+        circlesOverlap(x1, y1, b.r, tp.x, tp.y, tR)
+      ) {
+        tHit = 1
+      }
+      if (tHit == null) continue
+
+      const { perp, along } = distPointToUnitRay(tp.x, tp.y, x0, y0, ux, uy)
+      const behind = along < 0 ? -along * HIT_BEHIND_RAY_PENALTY : 0
+      const effPerp = perp + behind
+      const effSort = effPerp - rowDepth * HIT_DEPTH_SORT_BIAS
+      const pathAlign01 = clamp(
+        1 - effPerp / (expandedR * HIT_PATH_CORRIDOR_MULT),
+        0,
+        1
+      )
+      const localDepth = localTargetDepthOnWheel(worldAngle)
+      const depthScore = rowDepth / Math.max(1, RING_COUNT - 1) * 0.55 + localDepth * 0.45
+      const combinedScore =
+        pathAlign01 * 100 - tHit * 18 + depthScore * 6 + rowDepth * 0.35
+
+      candidates.push({
+        ringIdx: r,
+        slotIdx: i,
+        tHit,
+        rowDepth,
+        localDepth,
+        perpDist: perp,
+        alongRay: along,
+        effPerp,
+        effSort,
+        pathAlign01,
+        depthScore,
+        combinedScore,
+      })
+    }
+  }
+
+  sim.debugHitCandidateCount = candidates.length
+  if (candidates.length === 0) {
+    sim.debugHitWinnerLine = '—'
+    sim.debugHitCandidateLines = []
+    return null
+  }
+
+  candidates.sort((A, B) => {
+    const dS = A.effSort - B.effSort
+    if (Math.abs(dS) > 1e-6) return dS
+    if (Math.abs(A.tHit - B.tHit) > 1e-5) return A.tHit - B.tHit
+    if (A.rowDepth !== B.rowDepth) return B.rowDepth - A.rowDepth
+    return A.localDepth - B.localDepth
+  })
+
+  const win = candidates[0]
+  sim.debugHitWinnerLine = `WIN r${win.ringIdx} s${win.slotIdx} t=${win.tHit.toFixed(3)} perp=${win.perpDist.toFixed(1)} eff=${win.effPerp.toFixed(1)} align=${win.pathAlign01.toFixed(2)} zR=${win.rowDepth} zL=${win.localDepth.toFixed(2)} comb=${win.combinedScore.toFixed(1)} (n=${candidates.length})`
+
+  const topN = Math.min(5, candidates.length)
+  const lines: string[] = []
+  for (let k = 0; k < topN; k++) {
+    const c = candidates[k]
+    const tag = k === 0 ? '★' : ' '
+    lines.push(
+      `${tag} r${c.ringIdx}s${c.slotIdx} t=${c.tHit.toFixed(2)} perp=${c.perpDist.toFixed(1)} align=${c.pathAlign01.toFixed(2)} depth=${c.depthScore.toFixed(2)} comb=${c.combinedScore.toFixed(1)}`
+    )
+  }
+  sim.debugHitCandidateLines = lines
+
+  return { ring: win.ringIdx, idx: win.slotIdx }
 }
 
 function chainDestroyNeighbors(
@@ -1481,6 +1967,66 @@ function drawReleaseFlash(ctx: CanvasRenderingContext2D, sim: Sim): void {
   ctx.restore()
 }
 
+/** Draw ball with velocity-aligned stretch + backward smear (reads as blur in motion). */
+function drawDynamicBall(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  r: number,
+  vx: number,
+  vy: number,
+  fillStyle: string,
+  strokeStyle: string,
+  lineWidth: number,
+  stroke: boolean
+): number {
+  const sp = Math.hypot(vx, vy)
+  const angle = sp > 12 ? Math.atan2(vy, vx) : 0
+  const u = sp > 12 ? Math.min(sp / BALL_STRETCH_SPEED_REF, 1) : 0
+  const stretch = 1 + u * BALL_STRETCH_MAX
+  const squash = 1 / Math.sqrt(stretch)
+
+  if (sp > 55) {
+    const ux = vx / sp
+    const uy = vy / sp
+    const streakPx = Math.min(r * 1.1 + sp * 0.018, r * 4.2)
+    ctx.save()
+    for (let i = BALL_MOTION_BLUR_STEPS; i >= 1; i--) {
+      const t = i / BALL_MOTION_BLUR_STEPS
+      const px = x - ux * streakPx * t * 0.92
+      const py = y - uy * streakPx * t * 0.92
+      const tr = r * (0.88 + 0.12 * (1 - t)) * (0.92 + 0.08 * squash)
+      const ga = 0.11 * (1 - t * 0.75) * Math.min(sp / 320, 1)
+      ctx.globalAlpha = ga
+      ctx.fillStyle = fillStyle
+      ctx.beginPath()
+      ctx.arc(px, py, tr, 0, Math.PI * 2)
+      ctx.fill()
+    }
+    ctx.restore()
+  }
+
+  ctx.save()
+  ctx.translate(x, y)
+  ctx.rotate(angle)
+  ctx.scale(stretch, squash)
+  ctx.shadowBlur = 4 + Math.min(sp / 140, 10)
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.35)'
+  ctx.beginPath()
+  ctx.arc(0, 0, r, 0, Math.PI * 2)
+  ctx.fillStyle = fillStyle
+  ctx.fill()
+  ctx.shadowBlur = 0
+  if (stroke) {
+    ctx.strokeStyle = strokeStyle
+    ctx.lineWidth = lineWidth / Math.sqrt(stretch * squash)
+    ctx.stroke()
+  }
+  ctx.restore()
+
+  return r * Math.max(stretch, 1 / squash)
+}
+
 function drawBallTrail(ctx: CanvasRenderingContext2D, sim: Sim): void {
   const tier = sim.ballShotTier
   const band = sim.ballExitBand
@@ -1490,9 +2036,11 @@ function drawBallTrail(ctx: CanvasRenderingContext2D, sim: Sim): void {
   else if (band === 'carry') thick = 3.2
   else
     thick = tier === 'perfect_full_send' ? 4 : tier === 'full_send' ? 3 : 2
-  for (let i = sim.ballTrail.length - 1; i >= 0; i--) {
-    const pt = sim.ballTrail[i]
-    const u = i / Math.max(1, sim.ballTrail.length - 1)
+  const tr = sim.ballTrail
+  for (let i = tr.length - 1; i >= 0; i--) {
+    const pt = tr[i]
+    const prev = i > 0 ? tr[i - 1] : pt
+    const u = i / Math.max(1, tr.length - 1)
     const alpha =
       band === 'moonshot'
         ? 0.18 + (1 - u) * 0.52
@@ -1510,9 +2058,20 @@ function drawBallTrail(ctx: CanvasRenderingContext2D, sim: Sim): void {
     } else {
       ctx.fillStyle = `rgba(180, 200, 220, ${alpha * 0.7})`
     }
+    const dx = pt.x - prev.x
+    const dy = pt.y - prev.y
+    const seg = Math.hypot(dx, dy)
+    const angle = seg > 0.5 ? Math.atan2(dy, dx) : 0
+    const elong = 1 + Math.min(seg / 14, 2.1) * 0.55
+    const rad = thick * (0.4 + 0.6 * (1 - u))
+    ctx.save()
+    ctx.translate(pt.x, pt.y)
+    ctx.rotate(angle)
+    ctx.scale(elong, 1 / Math.sqrt(elong))
     ctx.beginPath()
-    ctx.arc(pt.x, pt.y, thick * (0.4 + 0.6 * (1 - u)), 0, Math.PI * 2)
+    ctx.arc(0, 0, rad, 0, Math.PI * 2)
     ctx.fill()
+    ctx.restore()
   }
 }
 
@@ -1625,6 +2184,17 @@ function drawDebugOverlay(ctx: CanvasRenderingContext2D, sim: Sim): void {
     ctx.moveTo(sim.ball.x, sim.ball.y)
     ctx.lineTo(sim.ball.x + nx * 90, sim.ball.y + ny * 90)
     ctx.stroke()
+    if (sim.ballRole === 'outgoing' && bv > 35) {
+      const rayLen = Math.min(240, 38 + bv * 0.22)
+      ctx.strokeStyle = 'rgba(120, 255, 160, 0.42)'
+      ctx.lineWidth = 1.25
+      ctx.setLineDash([5, 6])
+      ctx.beginPath()
+      ctx.moveTo(sim.ball.x, sim.ball.y)
+      ctx.lineTo(sim.ball.x + nx * rayLen, sim.ball.y + ny * rayLen)
+      ctx.stroke()
+      ctx.setLineDash([])
+    }
   }
 
   const fLive = powerToSpeedFactor(sim.pCurrent)
@@ -1683,12 +2253,22 @@ function drawDebugOverlay(ctx: CanvasRenderingContext2D, sim: Sim): void {
         ? 'settle'
         : 'cruise'
       : '—'
+  const timingQPreviewStr =
+    sim.debugPredictedTimingErrorSec != null
+      ? contactQuality01(sim.debugPredictedTimingErrorSec).toFixed(2)
+      : '—'
+  const timingQHitStr =
+    sim.debugTimingErrorSec != null
+      ? contactQuality01(sim.debugTimingErrorSec).toFixed(2)
+      : '—'
   const lines = [
     `pitch: ${sim.debugPitchHud}  ballRole: ${sim.ballRole}  arm: ${sim.pitchArmElapsed.toFixed(2)}s  auto:${sim.debugAutoPitch ? 'Y' : 'n'}`,
     `pitch v: ${sim.pitchSpeedNominal.toFixed(0)}  incoming ay: ${sim.pitchIncomingAy.toFixed(0)}  frT: ${sim.pitchContactFracT.toFixed(2)}  relDy: ${sim.pitchReleaseDyPx.toFixed(1)}`,
     `sweetQ prev: ${sim.debugSweetQPreview.toFixed(2)}  @hit: ${sim.debugSweetQAtContact.toFixed(2)}  batT: ${sim.debugContactAlongT.toFixed(2)}`,
     `xfer: ${sim.debugTransferEff.toFixed(2)}  pullU@hit: ${sim.debugPullbackUAtContact.toFixed(2)}  idle: ${sim.idleAutoPitchAccum.toFixed(2)}s`,
     `exit prev: ${sim.debugExitBandPreview}  last: ${sim.debugLastExitBand}  g×: ${sim.ballOutgoingGravityMul.toFixed(2)}`,
+    `V-band: prev ${sim.debugVerticalBandPreview}  @hit ${sim.debugVerticalBandAtContact}  class: prev ${sim.debugOutcomeClassPreview}  @hit ${sim.debugOutcomeClassAtContact}`,
+    `timingQ (0–1): prev ${timingQPreviewStr}  @hit ${timingQHitStr}`,
     `idealContactT: ${idealStr}  swingCrossT: ${swingStr}  simT: ${sim.simTime.toFixed(3)}`,
     `timingErr: ${terrStr}  predErr: ${predErrStr}  steer: ${steerStr}  bucket: ${sim.debugContactBucket}`,
     `launch θ: ${sim.debugLaunchAngleDeg.toFixed(1)}°  speed: ${sim.debugLaunchSpeed.toFixed(0)}`,
@@ -1711,6 +2291,8 @@ function drawDebugOverlay(ctx: CanvasRenderingContext2D, sim: Sim): void {
     sim.ball
       ? `ball v: (${sim.ball.vx.toFixed(0)}, ${sim.ball.vy.toFixed(0)})`
       : 'ball v: —',
+    `hit depth: ${sim.debugHitWinnerLine}`,
+    ...sim.debugHitCandidateLines,
     `disc exposed all hit: ${sim.debugAllTargetsTriggered}  (fixed occluder y)`,
     ...sim.rings.map((ring, r) => {
       const layer = r === 0 ? 'front' : r === 1 ? 'mid' : 'back'
@@ -1761,6 +2343,7 @@ function spawnIncomingPitch(sim: Sim, opts?: { auto?: boolean }): void {
   sim.ballRole = 'incoming'
   sim.ballShotTier = 'normal'
   sim.ballPierceArmed = false
+  sim.ballNextHitMinRing = null
   sim.ballExitBand = 'standard'
   sim.ballOutgoingGravityMul = 1
   sim.ballTrail = []
@@ -1770,6 +2353,9 @@ function spawnIncomingPitch(sim: Sim, opts?: { auto?: boolean }): void {
   sim.pitchContactResolved = false
   sim.batCrossLaunchTime = null
   sim.idleAutoPitchAccum = 0
+  sim.debugHitCandidateCount = 0
+  sim.debugHitWinnerLine = ''
+  sim.debugHitCandidateLines = []
 }
 
 function clearIncomingPitch(sim: Sim): void {
@@ -1781,20 +2367,30 @@ function clearIncomingPitch(sim: Sim): void {
   sim.pitchContactResolved = false
 }
 
+let lastSpriteThetaLogMs = 0
+
 export function GameCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const simRef = useRef<Sim | null>(null)
+  const spritesRef = useRef<LoadedGameSprites | null>(null)
   const devDrawOptionsRef = useRef<DevDrawOptions>({
     clipDiscLowerHalf: false,
     revealHiddenLayers: true,
     showLauncherDebugHud: true,
+    showSpriteDebug: false,
+    transparencyUnderlayTest: false,
   })
 
   const [devToolsOpen, setDevToolsOpen] = useState(false)
   const [clipDiscLowerHalf, setClipDiscLowerHalf] = useState(false)
   const [revealHiddenLayers, setRevealHiddenLayers] = useState(true)
   const [showLauncherDebugHud, setShowLauncherDebugHud] = useState(true)
+  const [showSpriteDebug, setShowSpriteDebug] = useState(false)
+  const [transparencyUnderlayTest, setTransparencyUnderlayTest] =
+    useState(false)
+  const [, setSpritesRevision] = useState(0)
+  const boardAspectRef = useRef(FALLBACK_BOARD_ASPECT)
 
   const resize = useCallback(() => {
     const container = containerRef.current
@@ -1805,14 +2401,15 @@ export function GameCanvas() {
     const vh = container.clientHeight
     if (vw <= 0 || vh <= 0) return
 
+    const aspect = boardAspectRef.current
     let w: number
     let h: number
-    if (vw / vh > ASPECT) {
+    if (vw / vh > aspect) {
       h = vh
-      w = h * ASPECT
+      w = h * aspect
     } else {
       w = vw
-      h = w / ASPECT
+      h = w / aspect
     }
 
     const dpr = Math.min(window.devicePixelRatio ?? 1, 2)
@@ -1823,11 +2420,34 @@ export function GameCanvas() {
 
     if (!simRef.current) {
       simRef.current = createSim(w, h)
-    } else {
-      layoutSim(simRef.current, w, h)
     }
+    layoutSim(simRef.current, w, h, spritesRef.current)
     simRef.current.dpr = dpr
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    loadGameSprites()
+      .then((loaded) => {
+        if (cancelled) return
+        spritesRef.current = loaded
+        boardAspectRef.current = getStadiumImageAspectRatio(loaded.bg)
+        resize()
+        setSpritesRevision((n) => n + 1)
+      })
+      .catch((err) => {
+        console.warn('Sprite assets failed to load; using layout fallback.', err)
+        spritesRef.current = null
+        boardAspectRef.current = FALLBACK_BOARD_ASPECT
+        const sim = simRef.current
+        if (sim) layoutSim(sim, sim.w, sim.h, null)
+        resize()
+        setSpritesRevision((n) => n + 1)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [resize])
 
   useEffect(() => {
     resize()
@@ -1845,10 +2465,11 @@ export function GameCanvas() {
     const sim = simRef.current
     if (!canvas || !sim) return
 
-    const ctx = canvas.getContext('2d')
+    const ctx = canvas.getContext('2d', { alpha: true })
     if (!ctx) return
 
     const { w, h, dpr } = sim
+    const targetRDraw = targetRadiusPx(w, h)
     let sx = 0
     let sy = 0
     if (sim.shakeRemain > 0) {
@@ -1856,12 +2477,25 @@ export function GameCanvas() {
       sx = (Math.random() - 0.5) * m * 2
       sy = (Math.random() - 0.5) * m * 2
     }
-    ctx.setTransform(dpr, 0, 0, dpr, sx * dpr, sy * dpr)
-    ctx.clearRect(-sx, -sy, w + Math.abs(sx) * 2, h + Math.abs(sy) * 2)
-
-    drawReleaseFlash(ctx, sim)
 
     const dev = devDrawOptionsRef.current
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    ctx.setTransform(dpr, 0, 0, dpr, sx * dpr, sy * dpr)
+
+    /* Dev-only: not a scene background — underlay to verify PNG alpha vs stadium. */
+    if (dev.transparencyUnderlayTest) {
+      ctx.fillStyle = '#ff0000'
+      ctx.fillRect(0, 0, w, h)
+    }
+
+    const sprites = spritesRef.current
+    if (sprites?.bg) {
+      drawBackgroundImage(ctx, sprites.bg, w, h)
+    }
+
+    drawReleaseFlash(ctx, sim)
     const clipWheel =
       dev.clipDiscLowerHalf && !dev.revealHiddenLayers
 
@@ -1884,7 +2518,7 @@ export function GameCanvas() {
           ring.radiusInner,
           r
         )
-        drawRingRowTargets(ctx, ring, r, dev.revealHiddenLayers)
+        drawRingRowTargets(ctx, ring, r, dev.revealHiddenLayers, targetRDraw)
         ctx.restore()
       }
     } else {
@@ -1919,7 +2553,7 @@ export function GameCanvas() {
       }
 
       for (let r = RING_COUNT - 1; r >= 0; r--) {
-        drawRingRowTargets(ctx, rings[r], r, dev.revealHiddenLayers)
+        drawRingRowTargets(ctx, rings[r], r, dev.revealHiddenLayers, targetRDraw)
       }
     }
 
@@ -1947,20 +2581,22 @@ export function GameCanvas() {
         sim.phase === 'swing' ||
         sim.phase === 'recovery')
 
-    if (sim.phase === 'charging' && sim.pointer) {
-      drawChargeWindowArcWhite(ctx, sim)
-    }
     if (showPostHitPreview) {
       drawPostHitTrajectoryPreview(ctx, sim)
     }
 
-    const tip = batTip(sim.pivot, sim.batLen, sim.theta)
-    ctx.strokeStyle = '#222'
-    ctx.lineWidth = 4
-    ctx.beginPath()
-    ctx.moveTo(sim.pivot.x, sim.pivot.y)
-    ctx.lineTo(tip.x, tip.y)
-    ctx.stroke()
+    drawHittingGuidance(ctx, sim)
+
+    if (sim.phase === 'charging' && sim.pointer) {
+      drawChargeWindowArcWhite(ctx, sim)
+    }
+
+    if (sprites?.statue && sim.spriteLayout) {
+      drawStatueSprite(ctx, sprites.statue, sim.spriteLayout)
+    }
+    if (sprites?.bat && sim.spriteLayout) {
+      drawBatSprite(ctx, sprites.bat, sim.spriteLayout, sim.theta)
+    }
 
     if (sim.phase === 'charging') {
       const pz = isPerfectSendZone(sim.pCurrent)
@@ -1976,61 +2612,70 @@ export function GameCanvas() {
     }
 
     if (sim.ball) {
+      const b = sim.ball
       if (sim.ballRole === 'outgoing') {
         drawBallTrail(ctx, sim)
       }
+      let fill = '#333'
+      let stroke = 'rgba(0,0,0,0)'
+      let lw = 2
       if (sim.ballRole === 'incoming') {
-        ctx.fillStyle = '#f2e6d8'
-        ctx.strokeStyle = 'rgba(200, 120, 60, 0.75)'
-        ctx.lineWidth = 2
+        fill = '#f2e6d8'
+        stroke = 'rgba(200, 120, 60, 0.75)'
+        lw = 2
       } else if (
         sim.ballRole === 'outgoing' &&
         sim.ballExitBand === 'moonshot'
       ) {
-        ctx.fillStyle = '#3a2416'
-        ctx.strokeStyle = 'rgba(255, 235, 160, 0.98)'
-        ctx.lineWidth = 3
+        fill = '#3a2416'
+        stroke = 'rgba(255, 235, 160, 0.98)'
+        lw = 3
       } else if (
         sim.ballRole === 'outgoing' &&
         sim.ballExitBand === 'power'
       ) {
-        ctx.fillStyle = '#342818'
-        ctx.strokeStyle = 'rgba(255, 200, 110, 0.9)'
-        ctx.lineWidth = 2.5
+        fill = '#342818'
+        stroke = 'rgba(255, 200, 110, 0.9)'
+        lw = 2.5
       } else if (sim.ballShotTier === 'perfect_full_send') {
-        ctx.fillStyle = '#3a2a22'
-        ctx.strokeStyle = 'rgba(255, 120, 60, 0.85)'
-        ctx.lineWidth = 2
+        fill = '#3a2a22'
+        stroke = 'rgba(255, 120, 60, 0.85)'
+        lw = 2
       } else if (sim.ballShotTier === 'full_send') {
-        ctx.fillStyle = '#2c2620'
-        ctx.strokeStyle = 'rgba(255, 190, 90, 0.65)'
-        ctx.lineWidth = 2
-      } else {
-        ctx.fillStyle = '#333'
+        fill = '#2c2620'
+        stroke = 'rgba(255, 190, 90, 0.65)'
+        lw = 2
       }
-      ctx.beginPath()
-      ctx.arc(sim.ball.x, sim.ball.y, sim.ball.r, 0, Math.PI * 2)
-      ctx.fill()
-      if (
+      const strokeOn =
         sim.ballRole === 'incoming' ||
-        sim.ballExitBand === 'moonshot' ||
-        sim.ballExitBand === 'power' ||
-        sim.ballShotTier === 'full_send' ||
-        sim.ballShotTier === 'perfect_full_send'
-      ) {
-        ctx.stroke()
-      }
+        (sim.ballRole === 'outgoing' &&
+          (sim.ballExitBand === 'moonshot' ||
+            sim.ballExitBand === 'power' ||
+            sim.ballShotTier === 'full_send' ||
+            sim.ballShotTier === 'perfect_full_send'))
+      const tipR = drawDynamicBall(
+        ctx,
+        b.x,
+        b.y,
+        b.r,
+        b.vx,
+        b.vy,
+        fill,
+        stroke,
+        lw,
+        strokeOn
+      )
       if (sim.ballRole === 'outgoing' && sim.ballExitBand === 'moonshot') {
         ctx.save()
         ctx.font = 'bold 11px system-ui, sans-serif'
         ctx.fillStyle = 'rgba(255, 230, 150, 0.98)'
-        ctx.fillText('MOONSHOT', sim.ball.x - 34, sim.ball.y - sim.ball.r - 8)
+        ctx.fillText('MOONSHOT', b.x - 34, b.y - tipR - 8)
         ctx.restore()
       } else if (sim.ballRole === 'outgoing' && sim.ballExitBand === 'power') {
         ctx.save()
         ctx.font = 'bold 10px system-ui, sans-serif'
         ctx.fillStyle = 'rgba(255, 210, 130, 0.95)'
-        ctx.fillText('POWER', sim.ball.x - 22, sim.ball.y - sim.ball.r - 7)
+        ctx.fillText('POWER', b.x - 22, b.y - tipR - 7)
         ctx.restore()
       } else if (
         sim.ballRole === 'outgoing' &&
@@ -2039,7 +2684,7 @@ export function GameCanvas() {
         ctx.save()
         ctx.font = 'bold 10px system-ui, sans-serif'
         ctx.fillStyle = 'rgba(255, 160, 90, 0.95)'
-        ctx.fillText('PERFECT SEND', sim.ball.x - 38, sim.ball.y - sim.ball.r - 6)
+        ctx.fillText('PERFECT SEND', b.x - 38, b.y - tipR - 6)
         ctx.restore()
       } else if (
         sim.ballRole === 'outgoing' &&
@@ -2048,7 +2693,7 @@ export function GameCanvas() {
         ctx.save()
         ctx.font = 'bold 10px system-ui, sans-serif'
         ctx.fillStyle = 'rgba(255, 210, 120, 0.9)'
-        ctx.fillText('FULL SEND', sim.ball.x - 28, sim.ball.y - sim.ball.r - 6)
+        ctx.fillText('FULL SEND', b.x - 28, b.y - tipR - 6)
         ctx.restore()
       }
     }
@@ -2062,6 +2707,20 @@ export function GameCanvas() {
     ctx.strokeText(scoreText, w - 12 - sw, 28)
     ctx.fillText(scoreText, w - 12 - sw, 28)
 
+    if (dev.showSpriteDebug && sim.spriteLayout) {
+      drawSpriteDebugOverlay(ctx, sim.spriteLayout, sim.theta)
+      const now = performance.now()
+      if (now - lastSpriteThetaLogMs > 400) {
+        lastSpriteThetaLogMs = now
+        console.debug(
+          '[sprite] theta rad',
+          sim.theta.toFixed(4),
+          'deg',
+          ((sim.theta * 180) / Math.PI).toFixed(1)
+        )
+      }
+    }
+
     if (devDrawOptionsRef.current.showLauncherDebugHud) {
       drawDebugOverlay(ctx, sim)
     }
@@ -2072,6 +2731,8 @@ export function GameCanvas() {
       clipDiscLowerHalf,
       revealHiddenLayers,
       showLauncherDebugHud,
+      showSpriteDebug,
+      transparencyUnderlayTest,
     }
     const sim = simRef.current
     const canvas = canvasRef.current
@@ -2080,6 +2741,8 @@ export function GameCanvas() {
     clipDiscLowerHalf,
     revealHiddenLayers,
     showLauncherDebugHud,
+    showSpriteDebug,
+    transparencyUnderlayTest,
     draw,
   ])
 
@@ -2209,20 +2872,28 @@ export function GameCanvas() {
         ixPrev.x,
         ixPrev.y,
         pullbackU,
-        sweetPrev
+        sweetPrev,
+        sim.pitchContactFracT,
+        chargeThetaForAimPreview(sim)
       )
       sim.debugExitBandPreview = outPrev.exitBand
       sim.debugPredictedTimingErrorSec = errPred
       if (outPrev.bucket === 'miss') {
         sim.debugPredictedPostHitVel = null
+        sim.debugVerticalBandPreview = '—'
+        sim.debugOutcomeClassPreview = '—'
       } else {
         sim.debugPredictedPostHitVel = { x: outPrev.vx, y: outPrev.vy }
+        sim.debugVerticalBandPreview = outPrev.verticalBand ?? '—'
+        sim.debugOutcomeClassPreview = outPrev.outcomeClass ?? '—'
       }
     } else {
       sim.debugPredictedPostHitVel = null
       sim.debugPredictedTimingErrorSec = null
       sim.debugSweetQPreview = 0
       sim.debugExitBandPreview = 'standard'
+      sim.debugVerticalBandPreview = '—'
+      sim.debugOutcomeClassPreview = '—'
     }
 
     sim.debugPreviewMatchesActual = false
@@ -2246,36 +2917,39 @@ export function GameCanvas() {
 
       if (sim.ballRole === 'incoming' && !sim.pitchContactResolved) {
         const ix = pitchPlannedContactPoint(sim)
-        const tipL = batTip(sim.pivot, sim.batLen, THETA_LAUNCH)
+        const thetaHit = sim.theta
+        const tipCur = batTip(sim.pivot, sim.batLen, thetaHit)
         const d2 = distSqPointSegment(
           b.x,
           b.y,
           sim.pivot.x,
           sim.pivot.y,
-          tipL.x,
-          tipL.y
+          tipCur.x,
+          tipCur.y
         )
         const tAlong = closestTOnBat(
           b.x,
           b.y,
           sim.pivot,
           sim.batLen,
-          THETA_LAUNCH
+          thetaHit
         )
-        const inUpperBarrel = tAlong >= 0.46
+        const inUpperBarrel = tAlong >= CONTACT_BARREL_T_MIN
         const inZone =
           d2 <= CONTACT_ZONE_R * CONTACT_ZONE_R && inUpperBarrel
+        const inSwingArc =
+          thetaHit <= CONTACT_THETA_EARLY && thetaHit >= CONTACT_THETA_LATE
         const pastPlate = b.x > ix.x + BALL_PAST_PLATE_DX && b.vx > 40
         const swingOk =
           (sim.phase === 'swing' || sim.phase === 'recovery') &&
           sim.pRelease > POWER_DEADZONE &&
           sim.idealContactTime > 0
 
-        if (inZone && swingOk && sim.batCrossLaunchTime != null) {
+        if (inZone && swingOk && inSwingArc) {
           sim.pitchContactResolved = true
-          const err = sim.batCrossLaunchTime - sim.idealContactTime
+          const err = sim.simTime - sim.idealContactTime
           sim.debugTimingErrorSec = err
-          sim.debugSwingCrossTime = sim.batCrossLaunchTime
+          sim.debugSwingCrossTime = sim.batCrossLaunchTime ?? sim.simTime
 
           const sweetHit = sweetSpotQuFromT(tAlong)
           sim.debugContactAlongT = tAlong
@@ -2287,7 +2961,9 @@ export function GameCanvas() {
             ix.x,
             ix.y,
             sim.pRelease,
-            sweetHit
+            sweetHit,
+            tAlong,
+            sim.thetaRelease
           )
           sim.debugTransferEff = out.transferEff
           sim.debugContactBucket = out.bucket
@@ -2302,6 +2978,7 @@ export function GameCanvas() {
             sim.ballRole = 'outgoing'
             sim.ballShotTier = out.tier
             sim.ballPierceArmed = out.tier === 'perfect_full_send'
+            sim.ballNextHitMinRing = null
             sim.ballExitBand = out.exitBand
             sim.ballOutgoingGravityMul = out.outgoingGravityMul
             sim.debugLastExitBand = out.exitBand
@@ -2319,6 +2996,8 @@ export function GameCanvas() {
               sim.debugContactFlash = 0.12
             }
             sim.debugOutgoingVel = { x: out.vx, y: out.vy }
+            sim.debugVerticalBandAtContact = out.verticalBand ?? '—'
+            sim.debugOutcomeClassAtContact = out.outcomeClass ?? '—'
             const cmp = sim.debugPredictedPostHitVel
             const predE = sim.debugPredictedTimingErrorSec
             sim.debugPreviewMatchesActual =
@@ -2329,6 +3008,8 @@ export function GameCanvas() {
           } else {
             sim.debugContactFlash = 0.06
             sim.debugOutgoingVel = null
+            sim.debugVerticalBandAtContact = '—'
+            sim.debugOutcomeClassAtContact = '—'
           }
         } else if (pastPlate) {
           sim.pitchContactResolved = true
@@ -2365,28 +3046,15 @@ export function GameCanvas() {
       let hitRing = -1
       let hitIdx = -1
       if (sim.ballRole === 'outgoing') {
-        for (let r = 0; r < RING_COUNT; r++) {
-          const ring = sim.rings[r]
-          const Rmid = ringMidFromDiscRing(ring)
-          for (let i = 0; i < ring.targetSlots.length; i++) {
-            const a = ring.rotation + ring.slotAngles[i]
-            const inExposed = targetIsExposedAboveOccluder(ring, Rmid, a)
-            if (!ring.targetSlots[i].isActive || !inExposed) continue
-            const tp = ringScreenPoint(
-              ring.center.x,
-              ring.center.y,
-              DISC_SX,
-              Rmid,
-              a
-            )
-            if (circlesOverlap(b.x, b.y, b.r, tp.x, tp.y, TARGET_R)) {
-              hitRing = r
-              hitIdx = i
-              break
-            }
-          }
-          if (hitRing >= 0) break
+        const resolved = resolveSingleTargetHit(sim, b, dt)
+        if (resolved != null) {
+          hitRing = resolved.ring
+          hitIdx = resolved.idx
         }
+      } else {
+        sim.debugHitCandidateCount = 0
+        sim.debugHitWinnerLine = ''
+        sim.debugHitCandidateLines = []
       }
 
       if (hitRing >= 0 && hitIdx >= 0) {
@@ -2400,6 +3068,7 @@ export function GameCanvas() {
 
         if (tier === 'perfect_full_send' && sim.ballPierceArmed) {
           sim.ballPierceArmed = false
+          sim.ballNextHitMinRing = Math.min(hitRing + 1, RING_COUNT)
           b.vx *= PIERCE_SPEED_MUL
           b.vy *= PIERCE_SPEED_MUL
           console.log('hit (pierce — perfect full send)')
@@ -2435,6 +3104,7 @@ export function GameCanvas() {
     if (sim.ball == null) {
       sim.ballOutgoingGravityMul = 1
       sim.ballExitBand = 'standard'
+      sim.ballNextHitMinRing = null
     }
 
     draw()
@@ -2693,6 +3363,38 @@ export function GameCanvas() {
                 onChange={(e) => setShowLauncherDebugHud(e.target.checked)}
               />
               Show launcher debug HUD
+            </label>
+            <label
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                marginTop: 6,
+                cursor: 'pointer',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={showSpriteDebug}
+                onChange={(e) => setShowSpriteDebug(e.target.checked)}
+              />
+              Sprite pivot / bat bbox / θ (console throttled)
+            </label>
+            <label
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                marginTop: 6,
+                cursor: 'pointer',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={transparencyUnderlayTest}
+                onChange={(e) => setTransparencyUnderlayTest(e.target.checked)}
+              />
+              Transparency test (red underlay before bg)
             </label>
           </div>
         )}
