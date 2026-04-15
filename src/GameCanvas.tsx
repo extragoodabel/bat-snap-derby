@@ -19,6 +19,7 @@ import {
   type Vec2,
 } from './physics'
 import { useGameLoop } from './useGameLoop'
+import { drawSpring } from './drawSpring'
 import {
   drawBackgroundImage,
   drawBatSprite,
@@ -30,6 +31,18 @@ import {
   type LoadedGameSprites,
   type SpriteLayout,
 } from './gameSprites'
+import {
+  drawAtmosphericBackGlow,
+  drawBatSilhouetteHalo,
+  drawHeroShimmer,
+  drawStatueSilhouetteHalo,
+} from './spriteGlow'
+import {
+  drawRetroScoreboard,
+  SCOREBOARD_TIME_LIMIT_SEC,
+  SCOREBOARD_TIMED_MODE,
+  targetPointsForRing,
+} from './scoreboard'
 
 /** Board aspect before bg-stadium loads (then replaced by the image’s width÷height). */
 const FALLBACK_BOARD_ASPECT = 16 / 9
@@ -71,6 +84,17 @@ const GALLERY_DEPTH_STEP_Y_FR = 0.044
 /** Front row anchor; CY lower on screen = field sits nearer “eye level” with raised batter. */
 const GALLERY_FRONT_CX_FR = 0.37
 const GALLERY_FRONT_CY_FR = 0.685
+/**
+ * Extra downward shift for the whole gallery stack (logical canvas px, +Y = down).
+ * Equivalent to raising `GALLERY_FRONT_CY_FR` by `this / h` each layout — applied only
+ * inside `galleryFrontRowAnchorY` so rings, targets, hits, occluder, and aim bounds stay in sync.
+ */
+const GALLERY_ROOT_OFFSET_Y_PX = 100
+/**
+ * With launcher debug HUD on: draw a line at the pre-offset anchor (`fraction × h` only)
+ * so you can confirm the full stack dropped by `GALLERY_ROOT_OFFSET_Y_PX`.
+ */
+const GALLERY_DEBUG_GUIDE_PRE_SHIFT_Y = false
 
 /**
  * Fixed machine lip in screen space (does not rotate with the wheel).
@@ -124,7 +148,6 @@ const POWER_STRONG = 0.75
 const POWER_FULL_SEND = 0.9
 const POWER_PERFECT_SEND = 0.97
 
-const BASE_HIT_SCORE = 100
 const CHAIN_ANGLE_RAD = 0.42
 const PIERCE_SPEED_MUL = 0.62
 const TRAIL_MAX = 22
@@ -132,8 +155,6 @@ const FLASH_FULL_SEND = 0.2
 const FLASH_PERFECT_SEND = 0.34
 const SHAKE_PERFECT = 0.22
 
-const PREVIEW_DT = 0.048
-const PREVIEW_STEPS = 32
 
 /** After pull-back, delay before the mound fires (readable telegraph). */
 const PITCH_ARM_DELAY_SEC = 0.32
@@ -148,6 +169,12 @@ const PITCH_CONTACT_FR_MIN = 0.48
 const PITCH_CONTACT_FR_MAX = 0.97
 /** Release point horizontal (fraction of w); left of plate for mostly +x travel. */
 const PITCH_MOUND_X_FR = 0.31
+/**
+ * Incoming pitch aims along the launch bat but caps distance from pivot so the
+ * target stays over the infield. Uncapped length from oversized sprite bats
+ * pushed contact above the canvas.
+ */
+const PITCH_AIM_BAT_LEN_MAX_FR = 0.345
 /** Tiny start Y vs target (px-ish via minDim); slight upward bias = ball approaches from above more. */
 const PITCH_RELEASE_DY_FR = 0.014
 const PITCH_RELEASE_DY_BIAS_FR = -0.0065
@@ -203,8 +230,12 @@ const BAT_PIVOT_Y_FR = 0.635
 /** Past this offset from plate X, pitch is gone (extra px = more time to connect). */
 const BALL_PAST_PLATE_DX = 128
 
-const GRAB_THRESH_PX = 52
-const GRAB_THRESH_SQ = GRAB_THRESH_PX * GRAB_THRESH_PX
+/** Minimum grab distance from bat segment (CSS px in logical canvas space). */
+const GRAB_THRESH_BASE_PX = 52
+/** Extra half-width scales with bat length so fat/long sprite bats stay grabbable. */
+const GRAB_THRESH_BATLEN_FR = 0.3
+/** Floor from canvas size so large boards don’t feel stingy. */
+const GRAB_THRESH_MIN_CANVAS_FR = 0.034
 const RIM_INNER_FR = 0.82
 
 type LauncherPhase = 'idle' | 'charging' | 'swing' | 'recovery'
@@ -399,6 +430,11 @@ type Sim = {
   ballOutgoingGravityMul: number
 
   score: number
+  /** Countdown when timed mode is on; `null` when untimed. */
+  timerRemainingSec: number | null
+  timedMode: boolean
+  /** Reserved for combo / bonus display on the scoreboard. */
+  comboMultiplier: number
   releaseFlashRemain: number
   releaseFlashTier: PowerTier | null
   shakeRemain: number
@@ -411,6 +447,8 @@ type Sim = {
   idealContactTime: number
   /** When bat crossed the launch plane this swing; null until then. */
   batCrossLaunchTime: number | null
+  /** `simTime` when swing phase started (release); spring hinge animation; null if idle/charging. */
+  springSwingT0: number | null
   /** Per-pitch: contact/miss already decided. */
   pitchContactResolved: boolean
 
@@ -488,11 +526,19 @@ function layoutDiscRingRadii(minDim: number): { ro: number; ri: number }[] {
   ]
 }
 
+/**
+ * Front-row hub Y in logical canvas space — the single vertical anchor for the disc gallery.
+ * All deeper rows are `fy - n*sy` from here; do not nudge individual rings in Y.
+ */
+function galleryFrontRowAnchorY(h: number): number {
+  return h * GALLERY_FRONT_CY_FR + GALLERY_ROOT_OFFSET_Y_PX
+}
+
 /** Front row at anchor; deeper rows offset up-left + extra left spread (px). */
 function layoutGalleryRingCenters(w: number, h: number): Vec2[] {
   const m = Math.min(w, h)
   const fx = w * GALLERY_FRONT_CX_FR
-  const fy = h * GALLERY_FRONT_CY_FR
+  const fy = galleryFrontRowAnchorY(h)
   const sx = m * GALLERY_DEPTH_STEP_X_FR
   const sy = m * GALLERY_DEPTH_STEP_Y_FR
   return [
@@ -744,6 +790,23 @@ function drawRingRowTargets(
       ctx.stroke()
     }
 
+    const pts = targetPointsForRing(ringIdx)
+    ctx.save()
+    const fontPx = Math.round(clamp(targetR * 1.14, 12, 22))
+    ctx.font = `600 ${fontPx}px "Oswald", "Bebas Neue", Impact, sans-serif`
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    const dimLabel = !upper || !active
+    ctx.lineWidth = dimLabel ? 1.5 : 2.25
+    ctx.strokeStyle = dimLabel ? 'rgba(0,0,0,0.42)' : 'rgba(0,0,0,0.35)'
+    ctx.fillStyle = dimLabel
+      ? 'rgba(240, 242, 248, 0.52)'
+      : 'rgba(255,255,255,0.97)'
+    const label = String(pts)
+    ctx.strokeText(label, pt.x, pt.y)
+    ctx.fillText(label, pt.x, pt.y)
+    ctx.restore()
+
     if (revealLabels) {
       ctx.save()
       ctx.font = '9px ui-monospace, monospace'
@@ -786,6 +849,10 @@ export type DevDrawOptions = {
    * background PNG show red; confirms alpha is compositing (not a solid underlay).
    */
   transparencyUnderlayTest: boolean
+  /**
+   * When false: no disc rendering, collisions, scoring, or disc target/occluder logic (dev only).
+   */
+  enableSpinningDiscs: boolean
 }
 
 function createSim(w: number, h: number): Sim {
@@ -824,6 +891,9 @@ function createSim(w: number, h: number): Sim {
     ballExitBand: 'standard',
     ballOutgoingGravityMul: 1,
     score: 0,
+    timedMode: SCOREBOARD_TIMED_MODE,
+    timerRemainingSec: SCOREBOARD_TIMED_MODE ? SCOREBOARD_TIME_LIMIT_SEC : null,
+    comboMultiplier: 1,
     releaseFlashRemain: 0,
     releaseFlashTier: null,
     shakeRemain: 0,
@@ -832,6 +902,7 @@ function createSim(w: number, h: number): Sim {
     simTime: 0,
     idealContactTime: -1,
     batCrossLaunchTime: null,
+    springSwingT0: null,
     pitchContactResolved: false,
     pitchSeq: 0,
     pitchContactFracT: SWEET_SPOT_T,
@@ -880,7 +951,14 @@ function layoutSim(
   sim.w = w
   sim.h = h
   if (sprites) {
-    const sl = computeSpriteLayout(w, h, sprites.statue, sprites.bat)
+    const sl = computeSpriteLayout(
+      w,
+      h,
+      sprites.statue,
+      sprites.bat,
+      sprites.statueOpaque,
+      sprites.batOpaque
+    )
     sim.spriteLayout = sl
     sim.pivot = sl.pivot
     sim.batLen = sl.batLen
@@ -903,18 +981,37 @@ function pointerToLogical(
   return { x: nx * sim.w, y: ny * sim.h }
 }
 
+function grabDistThreshPx(sim: Sim): number {
+  const m = Math.min(sim.w, sim.h)
+  return Math.max(
+    GRAB_THRESH_BASE_PX,
+    sim.batLen * GRAB_THRESH_BATLEN_FR,
+    m * GRAB_THRESH_MIN_CANVAS_FR
+  )
+}
+
 function nearBat(sim: Sim): boolean {
   if (!sim.pointer) return false
-  const tip = batTip(sim.pivot, sim.batLen, sim.theta)
-  const d2 = distSqPointSegment(
-    sim.pointer.x,
-    sim.pointer.y,
-    sim.pivot.x,
-    sim.pivot.y,
-    tip.x,
-    tip.y
-  )
-  return d2 <= GRAB_THRESH_SQ
+  const { pointer: p, pivot, batLen, theta } = sim
+  const thresh = grabDistThreshPx(sim)
+  const threshSq = thresh * thresh
+
+  const segDist = (tipX: number, tipY: number) =>
+    distSqPointSegment(p.x, p.y, pivot.x, pivot.y, tipX, tipY)
+
+  const tipPhys = batTip(pivot, batLen, theta)
+  let best = segDist(tipPhys.x, tipPhys.y)
+
+  if (sim.spriteLayout) {
+    const tipVis = batTip(
+      pivot,
+      batLen,
+      theta + sim.spriteLayout.batRotDeltaRad
+    )
+    best = Math.min(best, segDist(tipVis.x, tipVis.y))
+  }
+
+  return best <= threshSq
 }
 
 /** Screen-space bounds of the disc gallery (for aim points that stay on the board). */
@@ -969,9 +1066,10 @@ function powerTierFromTimingAbs(absErr: number): PowerTier {
 
 /** Planned contact point on the launch-plane bat for the current pitch params. */
 function pitchPlannedContactPoint(sim: Sim): Vec2 {
+  const aimLen = Math.min(sim.batLen, sim.h * PITCH_AIM_BAT_LEN_MAX_FR)
   return batPointAlong(
     sim.pivot,
-    sim.batLen,
+    aimLen,
     THETA_LAUNCH,
     sim.pitchContactFracT
   )
@@ -1156,7 +1254,6 @@ function chargeThetaForAimPreview(sim: Sim): number {
 
 /**
  * Baseball-style contact: timing + sweet-spot + pullback + **charge angle** + per-pitch spread.
- * Same function drives live hit and dotted preview.
  */
 function battedBallOutcome(
   sim: Sim,
@@ -1490,77 +1587,6 @@ function drawYawedAnnulus(
   ctx.stroke()
 }
 
-function samplePreviewPoint(
-  tipX: number,
-  tipY: number,
-  vx0: number,
-  vy0: number,
-  t: number,
-  gravity = OUTGOING_GRAVITY
-): { x: number; y: number } {
-  return {
-    x: tipX + vx0 * t,
-    y: tipY + vy0 * t + 0.5 * gravity * t * t,
-  }
-}
-
-/** Dotted arc = predicted batted path from timing-contact model (same as resolution at plate). */
-function drawPostHitTrajectoryPreview(ctx: CanvasRenderingContext2D, sim: Sim): void {
-  const err = predictTimingErrorForPreview(sim)
-  if (err == null) return
-  const pullbackU = sim.phase === 'charging' ? sim.pCurrent : sim.pRelease
-  const ix = pitchPlannedContactPoint(sim)
-  const sweetQ = sweetSpotQuFromT(sim.pitchContactFracT)
-  const out = battedBallOutcome(
-    sim,
-    err,
-    ix.x,
-    ix.y,
-    pullbackU,
-    sweetQ,
-    sim.pitchContactFracT,
-    chargeThetaForAimPreview(sim)
-  )
-  if (out.bucket === 'miss') return
-
-  const vx0 = out.vx
-  const vy0 = out.vy
-  const gPreview = OUTGOING_GRAVITY * out.outgoingGravityMul
-  const prevRgb =
-    out.exitBand === 'moonshot'
-      ? [255, 210, 90]
-      : out.exitBand === 'power'
-        ? [120, 230, 255]
-        : [0, 210, 255]
-
-  ctx.save()
-  ctx.setLineDash([6, 5])
-  let prev = { x: ix.x, y: ix.y }
-  for (let k = 1; k <= PREVIEW_STEPS; k++) {
-    const u = (k - 1) / Math.max(1, PREVIEW_STEPS - 1)
-    const alpha = 0.9 * (1 - 0.88 * u) + 0.1
-    const lw =
-      (out.exitBand === 'moonshot'
-        ? 5.2
-        : out.exitBand === 'power'
-          ? 4.1
-          : 3.4) *
-        (1 - 0.55 * u) +
-      1.15
-    const t = k * PREVIEW_DT
-    const cur = samplePreviewPoint(ix.x, ix.y, vx0, vy0, t, gPreview)
-    ctx.strokeStyle = `rgba(${prevRgb[0]}, ${prevRgb[1]}, ${prevRgb[2]}, ${alpha.toFixed(3)})`
-    ctx.lineWidth = lw
-    ctx.beginPath()
-    ctx.moveTo(prev.x, prev.y)
-    ctx.lineTo(cur.x, cur.y)
-    ctx.stroke()
-    prev = cur
-  }
-  ctx.setLineDash([])
-  ctx.restore()
-}
-
 /**
  * Always-on (non-debug) cues: contact disk, sweet band, pitch corridor, swing arc window,
  * and a “ripe” hint when the ball is near ideal contact time.
@@ -1860,8 +1886,7 @@ function resolveSingleTargetHit(
 function chainDestroyNeighbors(
   sim: Sim,
   ringIdx: number,
-  hitIndex: number,
-  mult: number
+  hitIndex: number
 ): void {
   const ring = sim.rings[ringIdx]
   const aHit = ring.rotation + ring.slotAngles[hitIndex]
@@ -1871,7 +1896,7 @@ function chainDestroyNeighbors(
     if (angularDiff(aHit, aj) <= CHAIN_ANGLE_RAD) {
       ring.targetSlots[j].wasTriggered = true
       ring.targetSlots[j].isActive = false
-      sim.score += Math.floor(BASE_HIT_SCORE * mult)
+      sim.score += targetPointsForRing(ringIdx)
     }
   }
 }
@@ -2075,7 +2100,11 @@ function drawBallTrail(ctx: CanvasRenderingContext2D, sim: Sim): void {
   }
 }
 
-function drawDebugOverlay(ctx: CanvasRenderingContext2D, sim: Sim): void {
+function drawDebugOverlay(
+  ctx: CanvasRenderingContext2D,
+  sim: Sim,
+  spinningDiscsEnabled: boolean
+): void {
   const { pivot: p, batLen: L } = sim
   const tip = batTip(p, L, sim.theta)
   const thetaVisDeg = (sim.theta * 180) / Math.PI
@@ -2291,15 +2320,23 @@ function drawDebugOverlay(ctx: CanvasRenderingContext2D, sim: Sim): void {
     sim.ball
       ? `ball v: (${sim.ball.vx.toFixed(0)}, ${sim.ball.vy.toFixed(0)})`
       : 'ball v: —',
-    `hit depth: ${sim.debugHitWinnerLine}`,
-    ...sim.debugHitCandidateLines,
-    `disc exposed all hit: ${sim.debugAllTargetsTriggered}  (fixed occluder y)`,
-    ...sim.rings.map((ring, r) => {
-      const layer = r === 0 ? 'front' : r === 1 ? 'mid' : 'back'
-      const dir = ring.omega >= 0 ? 'CW' : 'CCW'
-      return `ring ${r} (${layer}): ${dir}  ω=${ring.omega.toFixed(2)}  θ=${ring.rotation.toFixed(3)}`
-    }),
   ]
+  if (spinningDiscsEnabled) {
+    lines.push(
+      `hit depth: ${sim.debugHitWinnerLine}`,
+      ...sim.debugHitCandidateLines,
+      `disc exposed all hit: ${sim.debugAllTargetsTriggered}  (fixed occluder y)`,
+      ...sim.rings.map((ring, r) => {
+        const layer = r === 0 ? 'front' : r === 1 ? 'mid' : 'back'
+        const dir = ring.omega >= 0 ? 'CW' : 'CCW'
+        return `ring ${r} (${layer}): ${dir}  ω=${ring.omega.toFixed(2)}  θ=${ring.rotation.toFixed(3)}`
+      })
+    )
+  } else {
+    lines.push(
+      'spinning discs: OFF (dev) — no collisions, scoring, or disc target updates'
+    )
+  }
 
   ctx.font = '12px ui-monospace, monospace'
   ctx.fillStyle = 'rgba(0,0,0,0.82)'
@@ -2380,6 +2417,7 @@ export function GameCanvas() {
     showLauncherDebugHud: true,
     showSpriteDebug: false,
     transparencyUnderlayTest: false,
+    enableSpinningDiscs: true,
   })
 
   const [devToolsOpen, setDevToolsOpen] = useState(false)
@@ -2389,6 +2427,7 @@ export function GameCanvas() {
   const [showSpriteDebug, setShowSpriteDebug] = useState(false)
   const [transparencyUnderlayTest, setTransparencyUnderlayTest] =
     useState(false)
+  const [enableSpinningDiscs, setEnableSpinningDiscs] = useState(true)
   const [, setSpritesRevision] = useState(0)
   const boardAspectRef = useRef(FALLBACK_BOARD_ASPECT)
 
@@ -2496,93 +2535,91 @@ export function GameCanvas() {
     }
 
     drawReleaseFlash(ctx, sim)
-    const clipWheel =
-      dev.clipDiscLowerHalf && !dev.revealHiddenLayers
 
-    const { rings } = sim
-    const frontRing = rings[0]
-    const hubR = frontRing.radiusInner * 0.4
+    if (dev.enableSpinningDiscs) {
+      const clipWheel =
+        dev.clipDiscLowerHalf && !dev.revealHiddenLayers
 
-    if (clipWheel) {
-      for (let r = RING_COUNT - 1; r >= 0; r--) {
-        const ring = rings[r]
-        const { x: rcx, y: rcy } = ring.center
-        ctx.save()
-        clipToRegionAboveOccluderY(ctx, fixedOccluderScreenY(ring), sim.w)
-        drawYawedAnnulus(
-          ctx,
-          rcx,
-          rcy,
-          DISC_SX,
-          ring.radiusOuter,
-          ring.radiusInner,
-          r
-        )
-        drawRingRowTargets(ctx, ring, r, dev.revealHiddenLayers, targetRDraw)
-        ctx.restore()
+      const { rings } = sim
+
+      if (clipWheel) {
+        for (let r = RING_COUNT - 1; r >= 0; r--) {
+          const ring = rings[r]
+          const { x: rcx, y: rcy } = ring.center
+          ctx.save()
+          clipToRegionAboveOccluderY(ctx, fixedOccluderScreenY(ring), sim.w)
+          drawYawedAnnulus(
+            ctx,
+            rcx,
+            rcy,
+            DISC_SX,
+            ring.radiusOuter,
+            ring.radiusInner,
+            r
+          )
+          drawRingRowTargets(ctx, ring, r, dev.revealHiddenLayers, targetRDraw)
+          ctx.restore()
+        }
+      } else {
+        for (let r = RING_COUNT - 1; r >= 0; r--) {
+          const ring = rings[r]
+          const { x: rcx, y: rcy } = ring.center
+          drawYawedAnnulus(
+            ctx,
+            rcx,
+            rcy,
+            DISC_SX,
+            ring.radiusOuter,
+            ring.radiusInner,
+            r
+          )
+        }
+
+        if (dev.revealHiddenLayers) {
+          for (let r = RING_COUNT - 1; r >= 0; r--) {
+            const ring = rings[r]
+            drawFixedOccluderEdgeDebug(ctx, ring)
+          }
+          drawGalleryRowCenterDebug(ctx, rings)
+        }
+
+        for (let r = RING_COUNT - 1; r >= 0; r--) {
+          drawRingRowTargets(ctx, rings[r], r, dev.revealHiddenLayers, targetRDraw)
+        }
+      }
+
+      if (clipWheel) {
+        if (dev.revealHiddenLayers) {
+          for (let r = RING_COUNT - 1; r >= 0; r--) {
+            const ring = rings[r]
+            drawFixedOccluderEdgeDebug(ctx, ring)
+          }
+          drawGalleryRowCenterDebug(ctx, rings)
+        }
       }
     } else {
-      for (let r = RING_COUNT - 1; r >= 0; r--) {
-        const ring = rings[r]
-        const { x: rcx, y: rcy } = ring.center
-        drawYawedAnnulus(
-          ctx,
-          rcx,
-          rcy,
-          DISC_SX,
-          ring.radiusOuter,
-          ring.radiusInner,
-          r
-        )
-      }
-
-      ctx.fillStyle = '#363640'
-      ctx.beginPath()
-      ctx.arc(frontRing.center.x, frontRing.center.y, hubR, 0, Math.PI * 2)
-      ctx.fill()
-      ctx.strokeStyle = '#1a1a20'
-      ctx.lineWidth = 2
-      ctx.stroke()
-
-      if (dev.revealHiddenLayers) {
-        for (let r = RING_COUNT - 1; r >= 0; r--) {
-          const ring = rings[r]
-          drawFixedOccluderEdgeDebug(ctx, ring)
-        }
-        drawGalleryRowCenterDebug(ctx, rings)
-      }
-
-      for (let r = RING_COUNT - 1; r >= 0; r--) {
-        drawRingRowTargets(ctx, rings[r], r, dev.revealHiddenLayers, targetRDraw)
-      }
+      ctx.save()
+      ctx.font = '600 11px ui-monospace, system-ui, monospace'
+      ctx.textBaseline = 'bottom'
+      const note = 'Disc field disabled'
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)'
+      ctx.lineWidth = 3
+      ctx.strokeText(note, 10, h - 8)
+      ctx.fillStyle = 'rgba(255, 205, 130, 0.95)'
+      ctx.fillText(note, 10, h - 8)
+      ctx.restore()
     }
 
-    if (clipWheel) {
-      ctx.fillStyle = '#363640'
-      ctx.beginPath()
-      ctx.arc(frontRing.center.x, frontRing.center.y, hubR, 0, Math.PI * 2)
-      ctx.fill()
-      ctx.strokeStyle = '#1a1a20'
-      ctx.lineWidth = 2
-      ctx.stroke()
-      if (dev.revealHiddenLayers) {
-        for (let r = RING_COUNT - 1; r >= 0; r--) {
-          const ring = rings[r]
-          drawFixedOccluderEdgeDebug(ctx, ring)
-        }
-        drawGalleryRowCenterDebug(ctx, rings)
-      }
-    }
-
-    const showPostHitPreview =
-      sim.idealContactTime > 0 &&
-      predictTimingErrorForPreview(sim) != null &&
-      ((sim.phase === 'charging' && sim.pointer) ||
-        sim.phase === 'swing' ||
-        sim.phase === 'recovery')
-
-    if (showPostHitPreview) {
-      drawPostHitTrajectoryPreview(ctx, sim)
+    if (sim.spriteLayout) {
+      drawAtmosphericBackGlow(
+        ctx,
+        sim.spriteLayout,
+        w,
+        h,
+        sim.simTime,
+        sim.phase,
+        sim.omega
+      )
     }
 
     drawHittingGuidance(ctx, sim)
@@ -2591,11 +2628,69 @@ export function GameCanvas() {
       drawChargeWindowArcWhite(ctx, sim)
     }
 
+    /** Hero glow: Layer B halos → spring (on halos, under crisp sprites) → sprites → shimmer. */
+    if (sprites?.statue && sim.spriteLayout) {
+      drawStatueSilhouetteHalo(
+        ctx,
+        sprites.statue,
+        sim.spriteLayout,
+        sim.simTime,
+        sim.phase,
+        sim.omega
+      )
+    }
+    if (sprites?.bat && sim.spriteLayout) {
+      drawBatSilhouetteHalo(
+        ctx,
+        sprites.bat,
+        sim.spriteLayout,
+        sim.theta,
+        sim.simTime,
+        sim.phase,
+        sim.omega
+      )
+    }
+    if (sim.spriteLayout) {
+      const sl = sim.spriteLayout
+      const handA: Vec2 = {
+        x: sl.statueX + sl.statueHandSpringInVisX * sl.statueUniformScale,
+        y: sl.statueY + sl.statueHandSpringInVisY * sl.statueUniformScale,
+      }
+      const hingeTauSec =
+        sim.springSwingT0 != null &&
+        (sim.phase === 'swing' || sim.phase === 'recovery')
+          ? sim.simTime - sim.springSwingT0
+          : null
+      drawSpring(
+        ctx,
+        handA,
+        sim.pivot,
+        {
+          phase: sim.phase,
+          hingeTauSec,
+          batVisPhiRad: sim.theta + sl.batRotDeltaRad,
+          batRestPhiRad: THETA_REST + sl.batRotDeltaRad,
+          omega: sim.omega,
+        },
+        Math.min(w, h),
+        { debug: dev.showSpriteDebug }
+      )
+    }
     if (sprites?.statue && sim.spriteLayout) {
       drawStatueSprite(ctx, sprites.statue, sim.spriteLayout)
     }
     if (sprites?.bat && sim.spriteLayout) {
       drawBatSprite(ctx, sprites.bat, sim.spriteLayout, sim.theta)
+    }
+    if (sim.spriteLayout) {
+      drawHeroShimmer(
+        ctx,
+        sim.spriteLayout,
+        sim.simTime,
+        sim.theta,
+        sim.phase,
+        sim.omega
+      )
     }
 
     if (sim.phase === 'charging') {
@@ -2698,14 +2793,12 @@ export function GameCanvas() {
       }
     }
 
-    ctx.font = 'bold 16px ui-monospace, monospace'
-    ctx.fillStyle = 'rgba(255,255,255,0.92)'
-    ctx.strokeStyle = 'rgba(0,0,0,0.5)'
-    ctx.lineWidth = 3
-    const scoreText = `score ${sim.score}`
-    const sw = ctx.measureText(scoreText).width
-    ctx.strokeText(scoreText, w - 12 - sw, 28)
-    ctx.fillText(scoreText, w - 12 - sw, 28)
+    drawRetroScoreboard(ctx, w, h, {
+      score: sim.score,
+      timedMode: sim.timedMode,
+      timerRemainingSec: sim.timerRemainingSec,
+      comboMultiplier: sim.comboMultiplier,
+    })
 
     if (dev.showSpriteDebug && sim.spriteLayout) {
       drawSpriteDebugOverlay(ctx, sim.spriteLayout, sim.theta)
@@ -2722,7 +2815,34 @@ export function GameCanvas() {
     }
 
     if (devDrawOptionsRef.current.showLauncherDebugHud) {
-      drawDebugOverlay(ctx, sim)
+      if (
+        devDrawOptionsRef.current.enableSpinningDiscs &&
+        GALLERY_DEBUG_GUIDE_PRE_SHIFT_Y
+      ) {
+        const guideY = galleryFrontRowAnchorY(sim.h) - GALLERY_ROOT_OFFSET_Y_PX
+        ctx.save()
+        ctx.setLineDash([8, 6])
+        ctx.strokeStyle = 'rgba(255, 0, 160, 0.5)'
+        ctx.lineWidth = 1.25
+        ctx.beginPath()
+        ctx.moveTo(0, guideY)
+        ctx.lineTo(sim.w, guideY)
+        ctx.stroke()
+        ctx.setLineDash([])
+        ctx.font = '10px ui-monospace, monospace'
+        ctx.fillStyle = 'rgba(255, 0, 160, 0.85)'
+        ctx.fillText(
+          'pre-shift gallery anchor (GALLERY_FRONT_CY_FR × h)',
+          10,
+          Math.max(12, guideY - 6)
+        )
+        ctx.restore()
+      }
+      drawDebugOverlay(
+        ctx,
+        sim,
+        devDrawOptionsRef.current.enableSpinningDiscs
+      )
     }
   }, [])
 
@@ -2733,6 +2853,7 @@ export function GameCanvas() {
       showLauncherDebugHud,
       showSpriteDebug,
       transparencyUnderlayTest,
+      enableSpinningDiscs,
     }
     const sim = simRef.current
     const canvas = canvasRef.current
@@ -2743,6 +2864,7 @@ export function GameCanvas() {
     showLauncherDebugHud,
     showSpriteDebug,
     transparencyUnderlayTest,
+    enableSpinningDiscs,
     draw,
   ])
 
@@ -2752,14 +2874,23 @@ export function GameCanvas() {
 
     sim.simTime += dt
 
-    // Sim is game state in a ref; ring.rotation updates each tick (not React state).
-    for (let ri = 0; ri < RING_COUNT; ri++) {
-      const ring = sim.rings[ri]
-      ring.rotation += ring.omega * dt
+    if (
+      sim.timedMode &&
+      sim.timerRemainingSec != null &&
+      sim.timerRemainingSec > 0
+    ) {
+      sim.timerRemainingSec = Math.max(0, sim.timerRemainingSec - dt)
+    }
+
+    const discsOn = devDrawOptionsRef.current.enableSpinningDiscs
+    if (discsOn) {
+      for (let ri = 0; ri < RING_COUNT; ri++) {
+        const ring = sim.rings[ri]
+        ring.rotation += ring.omega * dt
+      }
+      updateDiscTargetStates(sim)
     }
     sim.prevTheta = sim.theta
-
-    updateDiscTargetStates(sim)
 
     if (sim.releaseFlashRemain > 0) {
       sim.releaseFlashRemain = Math.max(0, sim.releaseFlashRemain - dt)
@@ -2822,6 +2953,7 @@ export function GameCanvas() {
           sim.omega = 0
           sim.swingCrossedLaunch = false
           sim.recoverySettling = false
+          sim.springSwingT0 = null
           sim.chargeElapsed = 0
           sim.pCurrent = 0
           sim.pRelease = 0
@@ -3046,10 +3178,16 @@ export function GameCanvas() {
       let hitRing = -1
       let hitIdx = -1
       if (sim.ballRole === 'outgoing') {
-        const resolved = resolveSingleTargetHit(sim, b, dt)
-        if (resolved != null) {
-          hitRing = resolved.ring
-          hitIdx = resolved.idx
+        if (devDrawOptionsRef.current.enableSpinningDiscs) {
+          const resolved = resolveSingleTargetHit(sim, b, dt)
+          if (resolved != null) {
+            hitRing = resolved.ring
+            hitIdx = resolved.idx
+          }
+        } else {
+          sim.debugHitCandidateCount = 0
+          sim.debugHitWinnerLine = ''
+          sim.debugHitCandidateLines = []
         }
       } else {
         sim.debugHitCandidateCount = 0
@@ -3059,8 +3197,7 @@ export function GameCanvas() {
 
       if (hitRing >= 0 && hitIdx >= 0) {
         const tier = sim.ballShotTier
-        const mult = scoreMultiplier(tier)
-        sim.score += Math.floor(BASE_HIT_SCORE * mult)
+        sim.score += targetPointsForRing(hitRing)
 
         const struck = sim.rings[hitRing].targetSlots[hitIdx]
         struck.wasTriggered = true
@@ -3073,7 +3210,7 @@ export function GameCanvas() {
           b.vy *= PIERCE_SPEED_MUL
           console.log('hit (pierce — perfect full send)')
         } else if (tier === 'full_send') {
-          chainDestroyNeighbors(sim, hitRing, hitIdx, mult)
+          chainDestroyNeighbors(sim, hitRing, hitIdx)
           sim.ball = null
           sim.ballTrail = []
           sim.ballRole = 'none'
@@ -3136,6 +3273,7 @@ export function GameCanvas() {
       }
       sim.phase = 'charging'
       sim.recoverySettling = false
+      sim.springSwingT0 = null
       sim.chargeElapsed = 0
       sim.theta = thetaChargeFromPointer(
         sim.pivot.x,
@@ -3173,6 +3311,7 @@ export function GameCanvas() {
       sim.phase = 'idle'
       sim.theta = THETA_REST
       sim.omega = 0
+      sim.springSwingT0 = null
       sim.chargeElapsed = 0
       sim.pCurrent = 0
       sim.pRelease = 0
@@ -3193,6 +3332,7 @@ export function GameCanvas() {
         sim.shakeRemain = SHAKE_PERFECT
       }
       sim.phase = 'swing'
+      sim.springSwingT0 = sim.simTime
       sim.theta = sim.thetaRelease
       sim.omega =
         -(OMEGA_BASE + OMEGA_SCALE * sim.pRelease) * SWING_WHIP_MULT
@@ -3223,6 +3363,7 @@ export function GameCanvas() {
       sim.phase = 'idle'
       sim.theta = THETA_REST
       sim.omega = 0
+      sim.springSwingT0 = null
       sim.chargeElapsed = 0
       sim.pCurrent = 0
       sim.pRelease = 0
@@ -3304,6 +3445,33 @@ export function GameCanvas() {
               }}
             >
               Visibility
+            </div>
+            <label
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                marginBottom: 6,
+                cursor: 'pointer',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={enableSpinningDiscs}
+                onChange={(e) => setEnableSpinningDiscs(e.target.checked)}
+              />
+              Enable spinning discs
+            </label>
+            <div
+              style={{
+                fontSize: 10,
+                opacity: 0.65,
+                margin: '-2px 0 10px 22px',
+                lineHeight: 1.35,
+              }}
+            >
+              Off: no disc draw, collisions, scoring, or disc target / occluder
+              logic. Canvas shows “Disc field disabled”. Other gameplay continues.
             </div>
             <label
               style={{

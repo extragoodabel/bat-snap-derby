@@ -1,11 +1,18 @@
 import type { Vec2 } from './physics'
+import {
+  measureOpaqueBounds,
+  opaqueHeight,
+  opaqueWidth,
+  type OpaqueBounds,
+} from './spriteOpaqueBounds'
 
 /**
  * Public folder URLs (Vite serves `public/` at site root).
  * Try lowercase then `.PNG` — deployment may be case-sensitive while macOS often is not.
  */
 const SPRITE_URL_CANDIDATES = {
-  bg: ['/assets/bg-stadium.png', '/assets/bg-stadium.PNG'],
+  /** Stadium: WebP only (regenerate with `npm run assets:webp-bg` if missing). */
+  bg: ['/assets/bg-stadium.webp', '/assets/bg-stadium.WEBP'],
   statue: ['/assets/statue.png', '/assets/statue.PNG'],
   bat: ['/assets/bat.png', '/assets/bat.PNG'],
 } as const
@@ -14,51 +21,82 @@ export type LoadedGameSprites = {
   bg: HTMLImageElement
   statue: HTMLImageElement
   bat: HTMLImageElement
+  statueOpaque: OpaqueBounds
+  batOpaque: OpaqueBounds
 }
+
+export type { OpaqueBounds }
 
 export type SpriteLayout = {
   /** World grip point = sim.pivot; same as statue hand anchor. */
   pivot: Vec2
   batLen: number
+  /** Cropped draw dest (visible / opaque region scaled). */
   statueX: number
   statueY: number
   statueW: number
   statueH: number
-  /** statueDrawH / statue natural height */
+  statueSrcX: number
+  statueSrcY: number
+  statueSrcW: number
+  statueSrcH: number
+  /** Scene px per 1 source px within the cropped statue rect. */
   statueUniformScale: number
-  /** Hand grip pixel in statue source (natural coords, from image top-left). */
+  /** Hand in full-image natural coords (for reference). */
   statueHandNatX: number
   statueHandNatY: number
+  /** Hand relative to statueSrc top-left (source pixels). */
+  statueHandInVisX: number
+  statueHandInVisY: number
+  /** Hand UV clamped into statue opaque bounds (full-image px); spring / connectors. */
+  statueHandSpringNatX: number
+  statueHandSpringNatY: number
+  statueHandSpringInVisX: number
+  statueHandSpringInVisY: number
+  statueFullNatW: number
+  statueFullNatH: number
+  statueOpaque: OpaqueBounds
+
   batRotDeltaRad: number
   batKnobXPxNat: number
   batKnobYPxNat: number
+  batKnobInVisX: number
+  batKnobInVisY: number
   batDrawW: number
   batDrawH: number
+  batSrcX: number
+  batSrcY: number
+  batSrcW: number
+  batSrcH: number
   batNatW: number
   batNatH: number
   batUniformScale: number
+  batOpaque: OpaqueBounds
 }
 
-/** Single world anchor: physics pivot + statue hand + bat handle base (fractions of canvas). */
-const STATUE_ANCHOR_X_FR = 0.84
-const STATUE_ANCHOR_Y_FR = 0.78
+/**
+ * Single meet point: sim.pivot, statue-hand grip (UV below), and bat pivot at the
+ * bottom-center of the bat’s opaque bounds (true bottom of the cropped sprite).
+ */
+const STATUE_ANCHOR_X_FR = 0.805
+const STATUE_ANCHOR_Y_FR = 0.789
 
-/** Statue drawn height as fraction of canvas height (32–38% band, mid 34%). */
-const STATUE_HEIGHT_FR = 0.34
-/** Bat bitmap height target vs statue drawn height. */
-const BAT_DRAW_HEIGHT_FR_OF_STATUE = 0.9
+/** Visible statue height target — reduced vs full-PNG scale so figure matches stadium depth. */
+const STATUE_HEIGHT_FR = 0.21
+/** Applied after fit/height scale (e.g. 1.05 = 5% larger). */
+const STATUE_SCALE_MUL = 1.05
+/** Extra world-X offset for the statue draw (+ = right; bat pivot unchanged). */
+const STATUE_NUDGE_X_PX = -27
+/** Bat visible height vs statue visible height. */
+const BAT_DRAW_HEIGHT_FR_OF_STATUE = 0.88
 
 /**
  * Grip on statue texture: fraction of natural width/height from image top-left.
- * Tune until debug blue (hand) meets red (anchor) — they coincide by placement math when correct.
  */
 const STATUE_HAND_NAT_X_FR = 0.752
-const STATUE_HAND_NAT_Y_FR = 0.768
+const STATUE_HAND_NAT_Y_FR = 0.778
 
-/** Handle base (rotation pivot) in bat texture — fractions of natural size. */
-const BAT_KNOB_U = 0.756
-const BAT_KNOB_V = 0.77
-/** Barrel tip — physics length + sprite axis vs game θ. */
+/** Barrel tip in full texture (UV) — defines bat axis vs game θ and tip distance. */
 const BAT_TIP_U = 0.392
 const BAT_TIP_V = 0.125
 
@@ -91,12 +129,15 @@ async function loadImageDecoded(urls: readonly string[]): Promise<HTMLImageEleme
   return im
 }
 
-export function loadGameSprites(): Promise<LoadedGameSprites> {
-  return Promise.all([
+export async function loadGameSprites(): Promise<LoadedGameSprites> {
+  const [bg, statue, bat] = await Promise.all([
     loadImageDecoded(SPRITE_URL_CANDIDATES.bg),
     loadImageDecoded(SPRITE_URL_CANDIDATES.statue),
     loadImageDecoded(SPRITE_URL_CANDIDATES.bat),
-  ]).then(([bg, statue, bat]) => ({ bg, statue, bat }))
+  ])
+  const statueOpaque = measureOpaqueBounds(statue)
+  const batOpaque = measureOpaqueBounds(bat)
+  return { bg, statue, bat, statueOpaque, batOpaque }
 }
 
 /** width ÷ height of the stadium art; used to size the logical game board. */
@@ -107,45 +148,175 @@ export function getStadiumImageAspectRatio(img: HTMLImageElement): number {
   return iw / ih
 }
 
+/** Max statue scale so opaque rect + pivot stays inside canvas (hand at pivot). */
+function maxStatueScaleToFitCanvas(
+  pivot: Vec2,
+  canvasW: number,
+  canvasH: number,
+  pad: number,
+  srcW: number,
+  srcH: number,
+  handInVisX: number,
+  handInVisY: number
+): number {
+  let sMax = Number.POSITIVE_INFINITY
+  const { x: px, y: py } = pivot
+  if (handInVisX > 1e-6) {
+    sMax = Math.min(sMax, (px - pad) / handInVisX)
+  }
+  if (handInVisY > 1e-6) {
+    sMax = Math.min(sMax, (py - pad) / handInVisY)
+  }
+  const spanRight = srcW - handInVisX
+  if (spanRight > 1e-6) {
+    sMax = Math.min(sMax, (canvasW - pad - px) / spanRight)
+  }
+  const spanDown = srcH - handInVisY
+  if (spanDown > 1e-6) {
+    sMax = Math.min(sMax, (canvasH - pad - py) / spanDown)
+  }
+  return Math.max(1e-9, sMax)
+}
+
+/**
+ * Distance from (ox,oy) along unit direction (dx,dy) to the first exit from the
+ * half-open AABB [left,right)×[top,bottom) — bounds of the cropped bat bitmap in
+ * source pixels. Caps mechanical bat length so arcs don’t exceed the sprite.
+ */
+function distanceAlongRayToExitAabb(
+  ox: number,
+  oy: number,
+  dx: number,
+  dy: number,
+  left: number,
+  top: number,
+  right: number,
+  bottom: number
+): number {
+  let tMax = Infinity
+  if (dx > 1e-9) tMax = Math.min(tMax, (right - ox) / dx)
+  else if (dx < -1e-9) tMax = Math.min(tMax, (left - ox) / dx)
+  if (dy > 1e-9) tMax = Math.min(tMax, (bottom - oy) / dy)
+  else if (dy < -1e-9) tMax = Math.min(tMax, (top - oy) / dy)
+  if (!Number.isFinite(tMax) || tMax <= 0) return 0
+  return tMax
+}
+
 export function computeSpriteLayout(
   w: number,
   h: number,
   statueImg: HTMLImageElement,
-  batImg: HTMLImageElement
+  batImg: HTMLImageElement,
+  statueOpaque: OpaqueBounds,
+  batOpaque: OpaqueBounds
 ): SpriteLayout {
   const sNatW = statueImg.naturalWidth
   const sNatH = statueImg.naturalHeight
   const bNatW = batImg.naturalWidth
   const bNatH = batImg.naturalHeight
 
+  const sVisW = opaqueWidth(statueOpaque)
+  const sVisH = opaqueHeight(statueOpaque)
+  const bVisW = opaqueWidth(batOpaque)
+  const bVisH = opaqueHeight(batOpaque)
+
   const pivot: Vec2 = {
     x: w * STATUE_ANCHOR_X_FR,
     y: h * STATUE_ANCHOR_Y_FR,
   }
 
-  const statueDrawH = h * STATUE_HEIGHT_FR
-  const statueUniformScale = statueDrawH / sNatH
-  const statueW = sNatW * statueUniformScale
-  const statueH = sNatH * statueUniformScale
+  const statueSrcX = statueOpaque.minX
+  const statueSrcY = statueOpaque.minY
+  const statueSrcW = sVisW > 0 ? sVisW : sNatW
+  const statueSrcH = sVisH > 0 ? sVisH : sNatH
 
   const statueHandNatX = STATUE_HAND_NAT_X_FR * sNatW
   const statueHandNatY = STATUE_HAND_NAT_Y_FR * sNatH
+  const statueHandInVisX = statueHandNatX - statueSrcX
+  const statueHandInVisY = statueHandNatY - statueSrcY
 
-  const statueX = pivot.x - statueHandNatX * statueUniformScale
-  const statueY = pivot.y - statueHandNatY * statueUniformScale
+  const omx0 = statueOpaque.minX
+  const omy0 = statueOpaque.minY
+  const omx1 = statueOpaque.maxX - 1e-6
+  const omy1 = statueOpaque.maxY - 1e-6
+  const statueHandSpringNatX = Math.max(omx0, Math.min(omx1, statueHandNatX))
+  const statueHandSpringNatY = Math.max(omy0, Math.min(omy1, statueHandNatY))
+  const statueHandSpringInVisX = statueHandSpringNatX - statueSrcX
+  const statueHandSpringInVisY = statueHandSpringNatY - statueSrcY
 
-  const targetBatDrawH = statueDrawH * BAT_DRAW_HEIGHT_FR_OF_STATUE
-  const batUniformScale = targetBatDrawH / bNatH
-  const batDrawW = bNatW * batUniformScale
-  const batDrawH = bNatH * batUniformScale
+  const targetStatueVisH = h * STATUE_HEIGHT_FR
+  const sFromHeight =
+    sVisH > 0 ? targetStatueVisH / sVisH : targetStatueVisH / Math.max(1, sNatH)
+  const pad = Math.min(w, h) * 0.018
+  const sFit = maxStatueScaleToFitCanvas(
+    pivot,
+    w,
+    h,
+    pad,
+    statueSrcW,
+    statueSrcH,
+    statueHandInVisX,
+    statueHandInVisY
+  )
+  const statueUniformScale = Math.min(sFromHeight, sFit) * STATUE_SCALE_MUL
 
-  const batKnobXPxNat = BAT_KNOB_U * bNatW
-  const batKnobYPxNat = BAT_KNOB_V * bNatH
+  const statueW = statueSrcW * statueUniformScale
+  const statueH = statueSrcH * statueUniformScale
 
-  const vTipX = (BAT_TIP_U - BAT_KNOB_U) * bNatW
-  const vTipY = (BAT_TIP_V - BAT_KNOB_V) * bNatH
-  const batLen = Math.hypot(vTipX, vTipY) * batUniformScale
-  const batRotDeltaRad = -Math.PI / 2 - Math.atan2(vTipY, vTipX)
+  const statueX =
+    pivot.x - statueHandInVisX * statueUniformScale + STATUE_NUDGE_X_PX
+  /** Bottom of cropped statue flush with bottom of playfield (logical h). */
+  const statueY = h - statueH
+
+  const targetBatVisH = statueH * BAT_DRAW_HEIGHT_FR_OF_STATUE
+  const batUniformScale =
+    bVisH > 0 ? targetBatVisH / bVisH : targetBatVisH / Math.max(1, bNatH)
+
+  const batSrcX = batOpaque.minX
+  const batSrcY = batOpaque.minY
+  const batSrcW = bVisW > 0 ? bVisW : bNatW
+  const batSrcH = bVisH > 0 ? bVisH : bNatH
+
+  const batDrawW = batSrcW * batUniformScale
+  const batDrawH = batSrcH * batUniformScale
+
+  /** Pivot = bottom-center of opaque bat (maxY is exclusive → bottom edge of sprite). */
+  const batKnobXPxNat = (batOpaque.minX + batOpaque.maxX) / 2
+  const batKnobYPxNat = batOpaque.maxY
+  const batKnobInVisX = batKnobXPxNat - batSrcX
+  const batKnobInVisY = batKnobYPxNat - batSrcY
+
+  const vTipX = BAT_TIP_U * bNatW - batKnobXPxNat
+  const vTipY = BAT_TIP_V * bNatH - batKnobYPxNat
+  const dirLen = Math.hypot(vTipX, vTipY) || 1
+  const udx = vTipX / dirLen
+  const udy = vTipY / dirLen
+  const boxL = batSrcX
+  const boxT = batSrcY
+  const boxR = batSrcX + batSrcW
+  const boxB = batSrcY + batSrcH
+  const tExitPx = distanceAlongRayToExitAabb(
+    batKnobXPxNat,
+    batKnobYPxNat,
+    udx,
+    udy,
+    boxL,
+    boxT,
+    boxR,
+    boxB
+  )
+  const lenFromTipUv = dirLen * batUniformScale
+  const lenFromBounds =
+    tExitPx > 1e-6 ? tExitPx * batUniformScale : lenFromTipUv
+  const batLen = Math.min(lenFromTipUv, lenFromBounds)
+  /**
+   * Game bat angle θ uses tip at (cos θ, sin θ); THETA_UP = −π/2 is screen-up.
+   * After translate(pivot), `rotate(θ + batRotDelta)` must map the bitmap knob→tip
+   * vector (vTip) onto that ray. With canvas clockwise-positive rotate, that is
+   * batRotDelta = −atan2(vTipY, vTipX) — no extra −π/2 (that was wrong once the
+   * pivot moved to bottom-center; it skewed “sprite north” ~90° off).
+   */
+  const batRotDeltaRad = -Math.atan2(vTipY, vTipX)
 
   return {
     pivot,
@@ -154,17 +325,37 @@ export function computeSpriteLayout(
     statueY,
     statueW,
     statueH,
+    statueSrcX,
+    statueSrcY,
+    statueSrcW,
+    statueSrcH,
     statueUniformScale,
     statueHandNatX,
     statueHandNatY,
+    statueHandInVisX,
+    statueHandInVisY,
+    statueHandSpringNatX,
+    statueHandSpringNatY,
+    statueHandSpringInVisX,
+    statueHandSpringInVisY,
+    statueFullNatW: sNatW,
+    statueFullNatH: sNatH,
+    statueOpaque: { ...statueOpaque },
     batRotDeltaRad,
     batKnobXPxNat,
     batKnobYPxNat,
+    batKnobInVisX,
+    batKnobInVisY,
     batDrawW,
     batDrawH,
+    batSrcX,
+    batSrcY,
+    batSrcW,
+    batSrcH,
     batNatW: bNatW,
     batNatH: bNatH,
     batUniformScale,
+    batOpaque: { ...batOpaque },
   }
 }
 
@@ -195,15 +386,33 @@ export function drawStatueSprite(
   img: HTMLImageElement,
   layout: Pick<
     SpriteLayout,
-    'statueX' | 'statueY' | 'statueW' | 'statueH'
+    | 'statueX'
+    | 'statueY'
+    | 'statueW'
+    | 'statueH'
+    | 'statueSrcX'
+    | 'statueSrcY'
+    | 'statueSrcW'
+    | 'statueSrcH'
   >
 ): void {
-  ctx.drawImage(img, layout.statueX, layout.statueY, layout.statueW, layout.statueH)
+  ctx.drawImage(
+    img,
+    layout.statueSrcX,
+    layout.statueSrcY,
+    layout.statueSrcW,
+    layout.statueSrcH,
+    layout.statueX,
+    layout.statueY,
+    layout.statueW,
+    layout.statueH
+  )
 }
 
 /**
- * Bat rotates around statue hand pivot; knob drawn at (pivot) after transform.
- * ctx.translate(pivot) → rotate(θ + δ) → drawImage with top-left at (−knob*scale).
+ * Bat: mechanical pivot = visible knob. Knob must be expressed in **crop-local**
+ * pixels (full-image knob minus batSrc*), then dest offset = −(knobLocal/srcSize)*destSize
+ * so that source pixel (knobFull) maps to world pivot after translate→rotate.
  */
 export function drawBatSprite(
   ctx: CanvasRenderingContext2D,
@@ -216,26 +425,29 @@ export function drawBatSprite(
     batRotDeltaRad,
     batKnobXPxNat,
     batKnobYPxNat,
-    batDrawW,
-    batDrawH,
-    batNatW,
-    batNatH,
+    batSrcX,
+    batSrcY,
+    batSrcW,
+    batSrcH,
     batUniformScale,
   } = layout
+
+  const knobLocalX = batKnobXPxNat - batSrcX
+  const knobLocalY = batKnobYPxNat - batSrcY
+  const sw = Math.max(1, batSrcW)
+  const sh = Math.max(1, batSrcH)
+  const dw = sw * batUniformScale
+  const dh = sh * batUniformScale
+  const dxDest = -(knobLocalX / sw) * dw
+  const dyDest = -(knobLocalY / sh) * dh
+
   ctx.save()
   ctx.translate(pivot.x, pivot.y)
   ctx.rotate(thetaRad + batRotDeltaRad)
-  ctx.drawImage(
-    batImg,
-    0,
-    0,
-    batNatW,
-    batNatH,
-    -batKnobXPxNat * batUniformScale,
-    -batKnobYPxNat * batUniformScale,
-    batDrawW,
-    batDrawH
-  )
+  const prevSmooth = ctx.imageSmoothingEnabled
+  ctx.imageSmoothingEnabled = false
+  ctx.drawImage(batImg, batSrcX, batSrcY, sw, sh, dxDest, dyDest, dw, dh)
+  ctx.imageSmoothingEnabled = prevSmooth
   ctx.restore()
 }
 
@@ -252,31 +464,78 @@ export function drawSpriteDebugOverlay(
     pivot,
     statueX,
     statueY,
-    statueHandNatX,
-    statueHandNatY,
+    statueW,
+    statueH,
     statueUniformScale,
+    statueHandInVisX,
+    statueHandInVisY,
+    statueFullNatW,
+    statueFullNatH,
+    statueOpaque,
     batRotDeltaRad,
     batKnobXPxNat,
     batKnobYPxNat,
+    batKnobInVisX,
+    batKnobInVisY,
     batNatW,
     batNatH,
+    batSrcW,
+    batSrcH,
     batUniformScale,
   } = layout
   const phi = thetaRad + batRotDeltaRad
   const c = Math.cos(phi)
   const s = Math.sin(phi)
 
-  const handWx = statueX + statueHandNatX * statueUniformScale
-  const handWy = statueY + statueHandNatY * statueUniformScale
+  const handWx = statueX + statueHandInVisX * statueUniformScale
+  const handWy = statueY + statueHandInVisY * statueUniformScale
 
-  const kx = batKnobXPxNat * batUniformScale
-  const ky = batKnobYPxNat * batUniformScale
-  const tlX = pivot.x + c * (-kx) - s * (-ky)
-  const tlY = pivot.y + s * (-kx) + c * (-ky)
-  const knobWx = tlX + c * kx - s * ky
-  const knobWy = tlY + s * kx + c * ky
+  const swD = Math.max(1, batSrcW)
+  const shD = Math.max(1, batSrcH)
+  const dwDbg = swD * batUniformScale
+  const dhDbg = shD * batUniformScale
+  const dxD = -(batKnobInVisX / swD) * dwDbg
+  const dyD = -(batKnobInVisY / shD) * dhDbg
+  const fracKnobX = batKnobInVisX / swD
+  const fracKnobY = batKnobInVisY / shD
+  const lxKnob = dxD + fracKnobX * dwDbg
+  const lyKnob = dyD + fracKnobY * dhDbg
+  const knobWx = pivot.x + c * lxKnob - s * lyKnob
+  const knobWy = pivot.y + s * lxKnob + c * lyKnob
 
-  const corners: Vec2[] = [
+  const cornersCropped: Vec2[] = [
+    { x: 0, y: 0 },
+    { x: batSrcW, y: 0 },
+    { x: batSrcW, y: batSrcH },
+    { x: 0, y: batSrcH },
+  ].map((p) => {
+    const lx = (p.x - batKnobInVisX) * batUniformScale
+    const ly = (p.y - batKnobInVisY) * batUniformScale
+    return {
+      x: pivot.x + lx * c - ly * s,
+      y: pivot.y + lx * s + ly * c,
+    }
+  })
+
+  ctx.save()
+
+  const statueFullLeft =
+    statueX - statueOpaque.minX * statueUniformScale
+  const statueFullTop =
+    statueY - statueOpaque.minY * statueUniformScale
+  const statueFullW = statueFullNatW * statueUniformScale
+  const statueFullH = statueFullNatH * statueUniformScale
+
+  ctx.strokeStyle = 'rgba(255, 0, 255, 0.85)'
+  ctx.lineWidth = 2
+  ctx.setLineDash([6, 4])
+  ctx.strokeRect(statueFullLeft, statueFullTop, statueFullW, statueFullH)
+  ctx.strokeStyle = 'rgba(0, 255, 80, 0.9)'
+  ctx.setLineDash([4, 3])
+  ctx.strokeRect(statueX, statueY, statueW, statueH)
+  ctx.setLineDash([])
+
+  const batCornersFull: Vec2[] = [
     { x: 0, y: 0 },
     { x: batNatW, y: 0 },
     { x: batNatW, y: batNatH },
@@ -289,14 +548,22 @@ export function drawSpriteDebugOverlay(
       y: pivot.y + lx * s + ly * c,
     }
   })
+  ctx.strokeStyle = 'rgba(255, 100, 255, 0.75)'
+  ctx.lineWidth = 1.75
+  ctx.beginPath()
+  ctx.moveTo(batCornersFull[0].x, batCornersFull[0].y)
+  for (let i = 1; i < batCornersFull.length; i++) {
+    ctx.lineTo(batCornersFull[i].x, batCornersFull[i].y)
+  }
+  ctx.closePath()
+  ctx.stroke()
 
-  ctx.save()
   ctx.strokeStyle = 'rgba(0, 255, 255, 0.55)'
   ctx.lineWidth = 1.25
   ctx.beginPath()
-  ctx.moveTo(corners[0].x, corners[0].y)
-  for (let i = 1; i < corners.length; i++) {
-    ctx.lineTo(corners[i].x, corners[i].y)
+  ctx.moveTo(cornersCropped[0].x, cornersCropped[0].y)
+  for (let i = 1; i < cornersCropped.length; i++) {
+    ctx.lineTo(cornersCropped[i].x, cornersCropped[i].y)
   }
   ctx.closePath()
   ctx.stroke()
@@ -308,9 +575,14 @@ export function drawSpriteDebugOverlay(
     ctx.fill()
   }
 
-  dot(pivot.x, pivot.y, 'rgba(255, 40, 40, 0.95)', 6)
+  dot(pivot.x, pivot.y, 'rgba(255, 40, 40, 0.95)', 7)
   dot(handWx, handWy, 'rgba(60, 120, 255, 0.95)', 5)
-  dot(knobWx, knobWy, 'rgba(40, 220, 90, 0.95)', 4)
+  dot(knobWx, knobWy, 'rgba(40, 255, 80, 0.95)', 5)
+  if (Math.hypot(lxKnob, lyKnob) > 0.5) {
+    ctx.strokeStyle = 'rgba(255, 120, 0, 0.95)'
+    ctx.lineWidth = 2
+    ctx.strokeRect(knobWx - 6, knobWy - 6, 12, 12)
+  }
 
   const deg = (thetaRad * 180) / Math.PI
   ctx.font = '11px ui-monospace, monospace'
@@ -318,6 +590,15 @@ export function drawSpriteDebugOverlay(
   ctx.fillText(`θ=${deg.toFixed(1)}°`, pivot.x + 10, pivot.y - 12)
   ctx.fillStyle = 'rgba(200,200,200,0.85)'
   ctx.font = '9px ui-monospace, monospace'
-  ctx.fillText('R pivot  B hand  G bat knob', pivot.x + 10, pivot.y + 4)
+  ctx.fillText(
+    'R=pivot B=hand G=bat knob (must match R) | mag=statue full grn=statue crop',
+    pivot.x + 10,
+    pivot.y + 4
+  )
+  ctx.fillText(
+    `knobLocal ${batKnobInVisX.toFixed(1)},${batKnobInVisY.toFixed(1)} / crop ${swD}×${shD}`,
+    pivot.x + 10,
+    pivot.y + 16
+  )
   ctx.restore()
 }
