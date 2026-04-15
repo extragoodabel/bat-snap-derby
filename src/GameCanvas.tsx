@@ -178,23 +178,24 @@ const PULLBACK_MAX_RAD = Math.max(
   THETA_CHARGE_MAX - THETA_REST
 )
 
-const OMEGA_BASE = 5.0
-const OMEGA_SCALE = 7.5
-const SWING_DAMPING = 2.35
+const OMEGA_BASE = 5.75
+const OMEGA_SCALE = 8.6
+/** `omega *= exp(-this * dt)` during swing — lower keeps |ω| up longer → faster sweep through launch. */
+const SWING_DAMPING = 1.95
 /** Extra whip on release (Ichiro-style forward crack). */
 const SWING_WHIP_MULT = 1.52
 /** Lighter damping while carrying through full recovery loop. */
-const RECOVERY_DAMPING = 1.05
+const RECOVERY_DAMPING = 0.86
 /** Brief boost to keep loop snappy after ball leaves. */
-const RECOVERY_OMEGA_CARRY = 1.12
+const RECOVERY_OMEGA_CARRY = 1.22
 const TWO_PI = Math.PI * 2
 /** Damped spring on final approach to rest. */
-const SETTLE_SPRING_K = 68
-const SETTLE_OMEGA_DRAG = 4.2
+const SETTLE_SPRING_K = 86
+const SETTLE_OMEGA_DRAG = 4.85
 /** Small upward (CCW) kick at rest for athletic reverb. */
-const SETTLE_BOUNCE_OMEGA = 3.4
-const SETTLE_SNAP_ANGLE = 0.045
-const SETTLE_SNAP_OMEGA = 0.35
+const SETTLE_BOUNCE_OMEGA = 3.05
+const SETTLE_SNAP_ANGLE = 0.058
+const SETTLE_SNAP_OMEGA = 0.42
 /** Early swing: no grab (avoids fighting spawn). */
 const SWING_GRAB_LOCKOUT_SEC = 0.1
 
@@ -421,22 +422,6 @@ function canBeginBatGrab(sim: Sim): boolean {
   )
 }
 
-function cancelMobileCharge(sim: Sim): void {
-  if (sim.phase !== 'charging' || !sim.mobileChargeViaControls) return
-  sim.phase = 'idle'
-  sim.theta = THETA_REST
-  sim.omega = 0
-  sim.springSwingT0 = null
-  sim.chargeElapsed = 0
-  sim.pCurrent = 0
-  sim.pRelease = 0
-  sim.powerTierRelease = 'normal'
-  sim.releaseFlashTier = null
-  sim.releaseFlashRemain = 0
-  sim.pitchArmElapsed = 0
-  sim.mobileChargeViaControls = false
-}
-
 /** Ease-out: strong gains early, compressed top end so max p is not absurdly faster. */
 function powerToSpeedFactor(p: number): number {
   const c = clamp(p, 0, 1)
@@ -629,7 +614,6 @@ type Sim = {
   cloudTargets: CloudTarget[]
   parachutePayloads: ParachutePayload[]
   cloudSpawnCountdown: number
-  heavenHotdogCountdown: number
   nextFloatingTargetId: number
 
   /** Single responsive scale vs 1600×900 design reference. */
@@ -1098,7 +1082,6 @@ function createSim(w: number, h: number): Sim {
     cloudTargets: [],
     parachutePayloads: [],
     cloudSpawnCountdown: 0,
-    heavenHotdogCountdown: 0,
     nextFloatingTargetId: 1,
   }
   initFloatingCloudLayer(sim)
@@ -3840,7 +3823,8 @@ export function GameCanvas() {
         sim.theta = thetaFromNormalizedJoystick(sim.pivot, j.x, j.y)
         sim.pCurrent = pullbackNormalizedFromVisualTheta(sim.theta)
       } else if (sim.phase === 'charging' && sim.mobileChargeViaControls) {
-        cancelMobileCharge(sim)
+        /* Lift-to-swing: same as desktop mouse-up (commit or cancel via power deadzone). */
+        endChargeRef.current?.(sim)
       }
       draw()
     },

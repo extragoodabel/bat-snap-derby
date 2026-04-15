@@ -53,11 +53,12 @@ export function MobileArcadeControls({
       if (!base) return
       base.setPointerCapture(e.pointerId)
       draggingRef.current = true
-      onJoystickActiveChange(true)
       const r = base.getBoundingClientRect()
       const cx = r.left + r.width / 2
       const cy = r.top + r.height / 2
+      /* Aim first so the sim reads a non-deadzone vector when charge begins. */
       setStickPx(e.clientX - cx, e.clientY - cy)
+      onJoystickActiveChange(true)
     },
     [onJoystickActiveChange, setStickPx]
   )
@@ -84,8 +85,12 @@ export function MobileArcadeControls({
       } catch {
         /* ignore */
       }
-      resetStickVisual()
+      /**
+       * End charge / swing BEFORE zeroing stick offset. Otherwise onJoystickOffset(0,0) runs
+       * while still "charging" and clears pullback so release always looks like a whiff.
+       */
       onJoystickActiveChange(false)
+      resetStickVisual()
     },
     [onJoystickActiveChange, resetStickVisual]
   )
@@ -95,58 +100,68 @@ export function MobileArcadeControls({
       className={`mobile-arcade-controls mobile-arcade-controls--${variant}`}
       data-variant={variant}
     >
-      <div className="mobile-arcade-controls__cluster mobile-arcade-controls__cluster--left">
-        <div
-          ref={baseRef}
-          className="mobile-joystick"
-          onPointerDown={onJoystickPointerDown}
-          onPointerMove={onJoystickPointerMove}
-          onPointerUp={finishJoystick}
-          onPointerCancel={finishJoystick}
-        >
-          <div className="mobile-joystick__bezel" />
-          <div ref={stickRef} className="mobile-joystick__knob" />
+      <div className="mobile-arcade-controls__main">
+        <div className="mobile-arcade-controls__cluster mobile-arcade-controls__cluster--left">
+          <div
+            ref={baseRef}
+            className="mobile-joystick"
+            onPointerDown={onJoystickPointerDown}
+            onPointerMove={onJoystickPointerMove}
+            onPointerUp={finishJoystick}
+            onPointerCancel={finishJoystick}
+            onLostPointerCapture={finishJoystick}
+          >
+            <div className="mobile-joystick__bezel" />
+            <div ref={stickRef} className="mobile-joystick__knob" />
+          </div>
+          <span className="mobile-joystick__caption">Aim</span>
+          <label className="mobile-rapid">
+            <input
+              type="checkbox"
+              checked={rapidFireEnabled}
+              onChange={(ev) => onRapidFireChange(ev.target.checked)}
+            />
+            <span>Rapid demo swings</span>
+          </label>
         </div>
-        <label className="mobile-rapid">
-          <input
-            type="checkbox"
-            checked={rapidFireEnabled}
-            onChange={(ev) => onRapidFireChange(ev.target.checked)}
-          />
-          <span>Rapid</span>
-        </label>
+
+        <button
+          type="button"
+          className="mobile-swing-btn"
+          aria-label="Swing bat (while aiming)"
+          onPointerDown={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            e.currentTarget.setPointerCapture(e.pointerId)
+          }}
+          onPointerUp={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            try {
+              e.currentTarget.releasePointerCapture(e.pointerId)
+            } catch {
+              /* ignore */
+            }
+            onSwingPointerUp()
+          }}
+          onPointerCancel={(e) => {
+            try {
+              e.currentTarget.releasePointerCapture(e.pointerId)
+            } catch {
+              /* ignore */
+            }
+          }}
+        >
+          <span className="mobile-swing-btn__ring" />
+          <span className="mobile-swing-btn__label">SWING</span>
+          <span className="mobile-swing-btn__hint">or lift finger</span>
+        </button>
       </div>
 
-      <button
-        type="button"
-        className="mobile-swing-btn"
-        aria-label="Swing bat"
-        onPointerDown={(e) => {
-          e.preventDefault()
-          e.stopPropagation()
-          e.currentTarget.setPointerCapture(e.pointerId)
-        }}
-        onPointerUp={(e) => {
-          e.preventDefault()
-          e.stopPropagation()
-          try {
-            e.currentTarget.releasePointerCapture(e.pointerId)
-          } catch {
-            /* ignore */
-          }
-          onSwingPointerUp()
-        }}
-        onPointerCancel={(e) => {
-          try {
-            e.currentTarget.releasePointerCapture(e.pointerId)
-          } catch {
-            /* ignore */
-          }
-        }}
-      >
-        <span className="mobile-swing-btn__ring" />
-        <span className="mobile-swing-btn__label">SWING</span>
-      </button>
+      <p className="mobile-arcade-controls__howto">
+        Drag the pad to pull the bat back, then <strong>lift your finger</strong> to swing
+        (same as mouse). Or keep aiming and tap <strong>SWING</strong>.
+      </p>
     </div>
   )
 }

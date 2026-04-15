@@ -16,8 +16,8 @@ export const PITCHER_ANCHOR_Y_FR = 0.64
 export const PITCHER_HEIGHT_FR = 0.17
 
 /** Nudge after anchor + scale (logical canvas px): +X right, +Y down. */
-const PITCHER_OFFSET_X_PX = -24
-const PITCHER_OFFSET_Y_PX = 173
+const PITCHER_OFFSET_X_PX = -26
+const PITCHER_OFFSET_Y_PX = 169
 
 /**
  * 18-step loop (0-based texture indices → mariano1…5). Long holds on M1 / M5 so the loop

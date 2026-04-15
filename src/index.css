@@ -35,7 +35,8 @@
 }
 
 [data-game-layout='mobile-portrait'] {
-  --mobile-portrait-controls-reserved: 108px;
+  /* Band under canvas: joystick + swing + short how-to copy */
+  --mobile-portrait-controls-reserved: 132px;
 }
 
 [data-game-layout^='mobile'] .app-page {
@@ -171,6 +172,7 @@
 
 .game-canvas-shell__board {
   position: relative;
+  z-index: 0;
   flex: 1 1 auto;
   min-height: 0;
   min-width: 0;
@@ -192,19 +194,50 @@
 }
 
 .mobile-arcade-controls {
+  position: relative;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 0 10px 8px;
+  box-sizing: border-box;
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.mobile-arcade-controls__main {
   display: flex;
   flex-direction: row;
   align-items: flex-end;
   justify-content: space-between;
   gap: 12px;
-  padding: 0 10px 8px;
-  box-sizing: border-box;
+  width: 100%;
+}
+
+.mobile-arcade-controls__howto {
+  margin: 0;
+  padding: 0 2px 4px;
+  font: 600 11px/1.35 system-ui, sans-serif;
+  color: rgba(210, 225, 240, 0.88);
+  text-align: center;
+  letter-spacing: 0.01em;
+}
+
+.mobile-arcade-controls__howto strong {
+  color: #fff8f0;
+  font-weight: 700;
+}
+
+.mobile-arcade-controls--landscape .mobile-arcade-controls__howto {
+  display: none;
 }
 
 .mobile-arcade-controls--portrait {
   width: 100%;
-  min-height: calc(var(--mobile-portrait-controls-reserved, 108px) - 4px);
-  padding: 6px 10px 10px;
+  min-height: calc(var(--mobile-portrait-controls-reserved, 132px) - 4px);
+  padding: 6px 10px max(10px, env(safe-area-inset-bottom, 0px));
   background: linear-gradient(
     180deg,
     rgba(6, 10, 18, 0) 0%,
@@ -217,8 +250,8 @@
 .mobile-arcade-controls--landscape {
   width: 100%;
   height: 100%;
-  padding: 0 8px 10px;
-  align-items: flex-end;
+  padding: 0 8px max(10px, env(safe-area-inset-bottom, 0px));
+  justify-content: flex-end;
 }
 
 .mobile-arcade-controls__cluster {
@@ -234,11 +267,18 @@
 
 .mobile-joystick {
   position: relative;
-  width: 92px;
-  height: 92px;
+  width: 96px;
+  height: 96px;
   touch-action: none;
   border-radius: 50%;
   cursor: grab;
+}
+
+.mobile-joystick__caption {
+  font: 700 10px/1 system-ui, sans-serif;
+  letter-spacing: 0.14em;
+  color: rgba(200, 218, 235, 0.75);
+  margin-top: 2px;
 }
 
 .mobile-joystick__bezel {
@@ -278,28 +318,39 @@
 .mobile-rapid {
   display: flex;
   align-items: center;
-  gap: 5px;
-  font: 600 10px/1 system-ui, sans-serif;
-  letter-spacing: 0.06em;
-  color: rgba(220, 235, 245, 0.88);
+  gap: 8px;
+  margin-top: 4px;
+  padding: 8px 6px;
+  min-height: 44px;
+  box-sizing: border-box;
+  font: 600 11px/1.2 system-ui, sans-serif;
+  letter-spacing: 0.02em;
+  color: rgba(220, 235, 245, 0.92);
   user-select: none;
+  border-radius: 10px;
+  cursor: pointer;
 }
 
 .mobile-rapid input {
   accent-color: #d50032;
-  width: 14px;
-  height: 14px;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
 }
 
 .mobile-swing-btn {
   position: relative;
-  width: 86px;
-  height: 86px;
+  width: 92px;
+  height: 92px;
   border-radius: 50%;
   border: none;
   padding: 0;
   cursor: pointer;
   touch-action: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
   background: radial-gradient(
     circle at 35% 28%,
     #d50032 0%,
@@ -331,6 +382,18 @@
   font: 800 14px/1 'Oswald', system-ui, sans-serif;
   letter-spacing: 0.12em;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+
+.mobile-swing-btn__hint {
+  position: relative;
+  z-index: 1;
+  margin-top: 2px;
+  font: 600 8px/1.1 system-ui, sans-serif;
+  letter-spacing: 0.06em;
+  color: rgba(255, 248, 240, 0.88);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  max-width: 72px;
+  text-align: center;
 }
 
 @keyframes rotate-play-hint-spin {

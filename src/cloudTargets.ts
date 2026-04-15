@@ -1,5 +1,6 @@
 /**
- * Floating cloud bonus targets (placeholder art) + parachute payloads.
+ * Floating cloud bonus targets (placeholder art) + parachute hot dogs.
+ * Hot dogs only spawn when a cloud is hit; no separate “random sky” spawner.
  * Independent from spinning disc targets.
  */
 import { circlesOverlap, type Ball } from './physics'
@@ -8,9 +9,9 @@ import { CLOUD_TARGET_POINTS } from './scoreboard'
 // --- Tunables (see design doc) ---------------------------------------------
 
 /** Expected cloud spawns per second (reciprocal used as mean delay baseline). */
-export const CLOUD_SPAWN_RATE = 0.4
+export const CLOUD_SPAWN_RATE = 0.78
 /** Seconds ± jitter around mean spawn delay `1 / CLOUD_SPAWN_RATE`. */
-export const CLOUD_SPAWN_JITTER_SEC = 1.1
+export const CLOUD_SPAWN_JITTER_SEC = 0.88
 
 export const CLOUD_SPEED_MIN = 32
 export const CLOUD_SPEED_MAX = 54
@@ -39,15 +40,8 @@ export const PARACHUTE_VERTICAL_WOBBLE_AMP = 2.2
 export const PARACHUTE_VERTICAL_WOBBLE_SPEED = 2.4
 
 const CLOUD_OFFSCREEN_MARGIN = 72
-const MAX_CLOUDS = 7
+const MAX_CLOUDS = 11
 const MAX_PARACHUTES = 14
-
-/** Bonus parachute hotdogs that spawn directly overhead (“from heaven”). */
-const HEAVEN_HOTDOG_SPAWN_MEAN_SEC = 1.05
-const HEAVEN_HOTDOG_SPAWN_JITTER_SEC = 0.55
-/** Spawn band (fraction of canvas height) — high sky, above cloud band. */
-const HEAVEN_HOTDOG_Y_MIN_FR = 0.04
-const HEAVEN_HOTDOG_Y_MAX_FR = 0.14
 
 /** Hit radius for the bullseye on the cloud (logical px). */
 export const CLOUD_HIT_RADIUS = 24
@@ -92,8 +86,6 @@ export type FloatingCloudSimFields = {
   cloudTargets: CloudTarget[]
   parachutePayloads: ParachutePayload[]
   cloudSpawnCountdown: number
-  /** Countdown to spawn a bonus overhead hotdog (independent of cloud pops). */
-  heavenHotdogCountdown: number
   nextFloatingTargetId: number
 }
 
@@ -104,30 +96,6 @@ function randRange(a: number, b: number): number {
 function nextCloudSpawnDelay(): number {
   const mean = 1 / Math.max(0.05, CLOUD_SPAWN_RATE)
   return Math.max(0.35, mean + (Math.random() - 0.5) * 2 * CLOUD_SPAWN_JITTER_SEC)
-}
-
-function nextHeavenHotdogDelay(): number {
-  return Math.max(
-    0.28,
-    HEAVEN_HOTDOG_SPAWN_MEAN_SEC +
-      (Math.random() - 0.5) * 2 * HEAVEN_HOTDOG_SPAWN_JITTER_SEC
-  )
-}
-
-function spawnHeavenHotdog(sim: FloatingCloudSimFields): void {
-  if (sim.parachutePayloads.length >= MAX_PARACHUTES) return
-  const w = sim.w
-  const h = sim.h
-  const x = randRange(-50, w + 50)
-  const y = randRange(h * HEAVEN_HOTDOG_Y_MIN_FR, h * HEAVEN_HOTDOG_Y_MAX_FR)
-  sim.parachutePayloads.push({
-    id: sim.nextFloatingTargetId++,
-    x,
-    y,
-    swayPhase: Math.random() * Math.PI * 2,
-    alive: true,
-    age: 0,
-  })
 }
 
 export function cloudWorldY(simTime: number, c: CloudTarget): number {
@@ -162,7 +130,6 @@ export function initFloatingCloudLayer(sim: FloatingCloudSimFields): void {
   sim.cloudTargets = []
   sim.parachutePayloads = []
   sim.cloudSpawnCountdown = nextCloudSpawnDelay()
-  sim.heavenHotdogCountdown = nextHeavenHotdogDelay() * 0.35
   sim.nextFloatingTargetId = 1
 }
 
@@ -174,12 +141,6 @@ export function updateFloatingCloudLayer(
   if (sim.cloudSpawnCountdown <= 0) {
     spawnCloud(sim)
     sim.cloudSpawnCountdown = nextCloudSpawnDelay()
-  }
-
-  sim.heavenHotdogCountdown -= dt
-  if (sim.heavenHotdogCountdown <= 0) {
-    spawnHeavenHotdog(sim)
-    sim.heavenHotdogCountdown = nextHeavenHotdogDelay()
   }
 
   for (let i = sim.cloudTargets.length - 1; i >= 0; i--) {
@@ -195,17 +156,7 @@ export function updateFloatingCloudLayer(
     } else {
       c.popRemain -= dt
       if (c.popRemain <= 0) {
-        const y = cloudWorldY(sim.simTime, c)
-        if (sim.parachutePayloads.length < MAX_PARACHUTES) {
-          sim.parachutePayloads.push({
-            id: sim.nextFloatingTargetId++,
-            x: c.x,
-            y: y + 18,
-            swayPhase: Math.random() * Math.PI * 2,
-            alive: true,
-            age: 0,
-          })
-        }
+        /* Hot dog already released on cloud hit in `applyFloatingTargetHitsForBall`. */
         sim.cloudTargets.splice(i, 1)
       }
     }
@@ -283,6 +234,17 @@ export function applyFloatingTargetHitsForBall(
       c.state = 'popping'
       c.popRemain = CLOUD_POP_DURATION
       sim.score += CLOUD_TARGET_POINTS
+      /* “From heaven”: parachute hot dog drops from this cloud when it is triggered. */
+      if (sim.parachutePayloads.length < MAX_PARACHUTES) {
+        sim.parachutePayloads.push({
+          id: sim.nextFloatingTargetId++,
+          x: c.x,
+          y: cy + 18,
+          swayPhase: Math.random() * Math.PI * 2,
+          alive: true,
+          age: 0,
+        })
+      }
       break
     }
   }
