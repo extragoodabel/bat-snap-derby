@@ -1,5 +1,11 @@
 import type { Vec2 } from './physics'
 import {
+  designPx,
+  STATUE_FIT_PAD_DESIGN,
+  STATUE_NUDGE_X_DESIGN,
+  type SceneLayout,
+} from './sceneLayout'
+import {
   measureOpaqueBounds,
   opaqueHeight,
   opaqueWidth,
@@ -13,8 +19,9 @@ import {
 const SPRITE_URL_CANDIDATES = {
   /** Stadium: WebP only (regenerate with `npm run assets:webp-bg` if missing). */
   bg: ['/assets/bg-stadium.webp', '/assets/bg-stadium.WEBP'],
-  statue: ['/assets/statue.png', '/assets/statue.PNG'],
-  bat: ['/assets/bat.png', '/assets/bat.PNG'],
+  /** Sprites: WebP (`npm run assets:webp-sprites` to regenerate from PNGs). */
+  statue: ['/assets/statue.webp', '/assets/statue.WEBP'],
+  bat: ['/assets/bat.webp', '/assets/bat.WEBP'],
 } as const
 
 export type LoadedGameSprites = {
@@ -85,8 +92,6 @@ const STATUE_ANCHOR_Y_FR = 0.789
 const STATUE_HEIGHT_FR = 0.21
 /** Applied after fit/height scale (e.g. 1.05 = 5% larger). */
 const STATUE_SCALE_MUL = 1.05
-/** Extra world-X offset for the statue draw (+ = right; bat pivot unchanged). */
-const STATUE_NUDGE_X_PX = -27
 /** Bat visible height vs statue visible height. */
 const BAT_DRAW_HEIGHT_FR_OF_STATUE = 0.88
 
@@ -208,7 +213,8 @@ export function computeSpriteLayout(
   statueImg: HTMLImageElement,
   batImg: HTMLImageElement,
   statueOpaque: OpaqueBounds,
-  batOpaque: OpaqueBounds
+  batOpaque: OpaqueBounds,
+  layout: SceneLayout
 ): SpriteLayout {
   const sNatW = statueImg.naturalWidth
   const sNatH = statueImg.naturalHeight
@@ -247,7 +253,7 @@ export function computeSpriteLayout(
   const targetStatueVisH = h * STATUE_HEIGHT_FR
   const sFromHeight =
     sVisH > 0 ? targetStatueVisH / sVisH : targetStatueVisH / Math.max(1, sNatH)
-  const pad = Math.min(w, h) * 0.018
+  const pad = designPx(layout, STATUE_FIT_PAD_DESIGN)
   const sFit = maxStatueScaleToFitCanvas(
     pivot,
     w,
@@ -255,18 +261,31 @@ export function computeSpriteLayout(
     pad,
     statueSrcW,
     statueSrcH,
-    statueHandInVisX,
-    statueHandInVisY
+    statueHandSpringInVisX,
+    statueHandSpringInVisY
   )
-  const statueUniformScale = Math.min(sFromHeight, sFit) * STATUE_SCALE_MUL
+  let statueUniformScale = Math.min(sFromHeight, sFit) * STATUE_SCALE_MUL
+
+  const nudgeX = designPx(layout, STATUE_NUDGE_X_DESIGN)
+
+  /** Keep statue in frame when hand is locked to pivot (bottom may sit above field edge). */
+  const spanBelowHand = statueSrcH - statueHandSpringInVisY
+  if (spanBelowHand > 1e-3) {
+    const sMaxBottom =
+      (h - pad - pivot.y) / spanBelowHand
+    if (Number.isFinite(sMaxBottom) && sMaxBottom > 0) {
+      statueUniformScale = Math.min(statueUniformScale, sMaxBottom)
+    }
+  }
 
   const statueW = statueSrcW * statueUniformScale
   const statueH = statueSrcH * statueUniformScale
 
-  const statueX =
-    pivot.x - statueHandInVisX * statueUniformScale + STATUE_NUDGE_X_PX
-  /** Bottom of cropped statue flush with bottom of playfield (logical h). */
-  const statueY = h - statueH
+  const handWX = statueHandSpringInVisX * statueUniformScale
+  const handWY = statueHandSpringInVisY * statueUniformScale
+  /** Single hero anchor: spring hand meets bat pivot in world space. */
+  const statueX = pivot.x - handWX + nudgeX
+  const statueY = pivot.y - handWY
 
   const targetBatVisH = statueH * BAT_DRAW_HEIGHT_FR_OF_STATUE
   const batUniformScale =
@@ -359,6 +378,9 @@ export function computeSpriteLayout(
   }
 }
 
+/** Logical playfield / letterbox void — keep in sync with `--stage-void` in `index.css`. */
+export const STAGE_VOID_HEX = '#060a12'
+
 /**
  * Full stadium layer: CSS `background-size: contain`, centered.
  * Entire image stays visible; when the canvas aspect matches the asset, it fills w×h.
@@ -378,6 +400,9 @@ export function drawBackgroundImage(
   const dh = ih * scale
   const dx = (w - dw) / 2
   const dy = (h - dh) / 2
+  /* Letterbox/pillarbox bands stay void-colored, not transparent (avoids white compositor flash). */
+  ctx.fillStyle = STAGE_VOID_HEX
+  ctx.fillRect(0, 0, w, h)
   ctx.drawImage(img, dx, dy, dw, dh)
 }
 

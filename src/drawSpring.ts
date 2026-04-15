@@ -116,11 +116,12 @@ export function drawSpring(
   B: Vec2,
   motion: SpringMotionInput,
   canvasMinDim: number,
-  options?: { debug?: boolean }
+  options?: { debug?: boolean; layoutScale?: number }
 ): void {
+  const px = options?.layoutScale ?? 1
   const a: Vec2 = {
-    x: A.x + SPRING_HAND_OFFSET_X_PX,
-    y: A.y + SPRING_HAND_OFFSET_Y_PX,
+    x: A.x + SPRING_HAND_OFFSET_X_PX * px,
+    y: A.y + SPRING_HAND_OFFSET_Y_PX * px,
   }
   const phi = motion.batVisPhiRad
   const phi0 = motion.batRestPhiRad
@@ -128,11 +129,11 @@ export function drawSpring(
   const perp0Y = Math.cos(phi0)
   /** World delta from pivot at rest (matches previous screen-fixed tuning when φ = φ₀). */
   const dwx =
-    SPRING_BAT_KNOB_OFFSET_X_PX +
-    SPRING_BAT_KNOB_PERP_OFFSET_PX * perp0X
+    SPRING_BAT_KNOB_OFFSET_X_PX * px +
+    SPRING_BAT_KNOB_PERP_OFFSET_PX * perp0X * px
   const dwy =
-    SPRING_BAT_KNOB_OFFSET_Y_PX +
-    SPRING_BAT_KNOB_PERP_OFFSET_PX * perp0Y
+    SPRING_BAT_KNOB_OFFSET_Y_PX * px +
+    SPRING_BAT_KNOB_PERP_OFFSET_PX * perp0Y * px
   const c0 = Math.cos(phi0)
   const s0 = Math.sin(phi0)
   const localX = c0 * dwx + s0 * dwy
@@ -147,7 +148,7 @@ export function drawSpring(
   const dx = b.x - a.x
   const dy = b.y - a.y
   const L = Math.hypot(dx, dy)
-  if (L < SPRING_MIN_LEN_PX) return
+  if (L < SPRING_MIN_LEN_PX * px) return
 
   const ux = dx / L
   const uy = dy / L

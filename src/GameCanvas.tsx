@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
 } from 'react'
+import { createPortal } from 'react-dom'
 import { DISC_SX, ringScreenPoint } from './disc'
 import {
   type Ball,
@@ -28,6 +29,7 @@ import {
   loadGameSprites,
   computeSpriteLayout,
   getStadiumImageAspectRatio,
+  STAGE_VOID_HEX,
   type LoadedGameSprites,
   type SpriteLayout,
 } from './gameSprites'
@@ -39,13 +41,53 @@ import {
 } from './spriteGlow'
 import {
   drawRetroScoreboard,
+  getScoreboardScreenRect,
   SCOREBOARD_TIME_LIMIT_SEC,
   SCOREBOARD_TIMED_MODE,
   targetPointsForRing,
 } from './scoreboard'
+import {
+  applyFloatingTargetHitsForBall,
+  drawFloatingCloudLayer,
+  initFloatingCloudLayer,
+  updateFloatingCloudLayer,
+  type CloudTarget,
+  type ParachutePayload,
+} from './cloudTargets'
+import {
+  BALL_PAST_PLATE_DX_DESIGN,
+  BALL_R_DESIGN,
+  computeSceneLayout,
+  CONTACT_ZONE_R_DESIGN,
+  designPx,
+  DESIGN_REF_H,
+  DESIGN_REF_W,
+  GALLERY_RING_SHIFT_BACK_DESIGN,
+  GALLERY_RING_SHIFT_MID_DESIGN,
+  GALLERY_ROOT_OFFSET_Y_DESIGN,
+  GRAB_THRESH_BASE_DESIGN,
+  POWER_BAR_DROP_TOWARD_PIVOT_DESIGN,
+  POWER_BAR_GAP_ABOVE_SWING_DESIGN,
+  POWER_BAR_HEIGHT_DESIGN,
+  POWER_BAR_LABEL_CLEARANCE_DESIGN,
+  POWER_BAR_MIN_WIDTH_DESIGN,
+  PITCH_MOUND_NUDGE_UP_DESIGN,
+  type SceneLayout,
+} from './sceneLayout'
 
 /** Board aspect before bg-stadium loads (then replaced by the image’s width÷height). */
 const FALLBACK_BOARD_ASPECT = 16 / 9
+
+/** Logical canvas must leave room for cabinet chrome; totals must match `index.css` :root. */
+function readPlayfieldFrameBudgetPx(): { x: number; y: number } {
+  if (typeof document === 'undefined') return { x: 76, y: 79 }
+  const cs = getComputedStyle(document.documentElement)
+  const x =
+    parseFloat(cs.getPropertyValue('--playfield-frame-total-x').trim()) || 76
+  const y =
+    parseFloat(cs.getPropertyValue('--playfield-frame-total-y').trim()) || 79
+  return { x: Math.max(0, x), y: Math.max(0, y) }
+}
 const GRAVITY = 700
 /** Batted balls only — keep moderate so balls don’t dive under the wheel. */
 const OUTGOING_GRAVITY = 392
@@ -53,16 +95,24 @@ const RING_OMEGA = 0.55
 /** Concentric rows: index 0 = front/smallest, 2 = back/largest. */
 const RING_COUNT = 3
 const RING_TARGET_COUNTS: [number, number, number] = [7, 7, 8]
-const BALL_R = 9
 /** Stretch scales with speed / this (px/s) for motion feel. */
 const BALL_STRETCH_SPEED_REF = 720
 const BALL_STRETCH_MAX = 0.48
 /** Motion-blur streak samples behind the ball along −velocity. */
 const BALL_MOTION_BLUR_STEPS = 5
-/** Hit / draw radius for rim targets; scales with canvas so larger discs get proportional zones. */
-function targetRadiusPx(w: number, h: number): number {
-  const m = Math.min(w, h)
-  return Math.max(15, m * 0.0262)
+/** Hit / draw radius for rim targets; scales with layout + canvas min side. */
+function targetRadiusPx(sim: Sim): number {
+  const m = Math.min(sim.w, sim.h)
+  const s = sim.sceneLayout.scale
+  return Math.max(12 * s, m * 0.0262)
+}
+
+function ballRadiusPx(sim: Sim): number {
+  return Math.max(4.25, BALL_R_DESIGN * sim.sceneLayout.scale)
+}
+
+function contactZoneRadiusPx(sim: Sim): number {
+  return CONTACT_ZONE_R_DESIGN * sim.sceneLayout.scale
 }
 
 /** Path-alignment: effPerp ÷ (expandedR × this) → pathAlign01 (debug / intuition). */
@@ -76,8 +126,6 @@ const DISC_RING_GAP_FR = 0.034
 /** Global scale for all disc radii — main stage presence vs rest of scene. */
 const DISC_LAYOUT_SCALE = 1.48
 /** Extra left shift (px) for staggered rows; grows with larger layout. */
-const GALLERY_RING_SHIFT_MID_PX = 28
-const GALLERY_RING_SHIFT_BACK_PX = 52
 /** Deeper rows: more spread so each disc reads as its own layer. */
 const GALLERY_DEPTH_STEP_X_FR = 0.036
 const GALLERY_DEPTH_STEP_Y_FR = 0.044
@@ -89,10 +137,9 @@ const GALLERY_FRONT_CY_FR = 0.685
  * Equivalent to raising `GALLERY_FRONT_CY_FR` by `this / h` each layout — applied only
  * inside `galleryFrontRowAnchorY` so rings, targets, hits, occluder, and aim bounds stay in sync.
  */
-const GALLERY_ROOT_OFFSET_Y_PX = 100
 /**
  * With launcher debug HUD on: draw a line at the pre-offset anchor (`fraction × h` only)
- * so you can confirm the full stack dropped by `GALLERY_ROOT_OFFSET_Y_PX`.
+ * so you can confirm the full stack dropped by `GALLERY_ROOT_OFFSET_Y_DESIGN` (via `designPx`).
  */
 const GALLERY_DEBUG_GUIDE_PRE_SHIFT_Y = false
 
@@ -148,13 +195,6 @@ const POWER_STRONG = 0.75
 const POWER_FULL_SEND = 0.9
 const POWER_PERFECT_SEND = 0.97
 
-/** Gap between top of bat swing circle and power bar (logical px). */
-const POWER_BAR_GAP_ABOVE_SWING_PX = 12
-/** Space reserved above bar for tier hint labels. */
-const POWER_BAR_LABEL_CLEARANCE_PX = 20
-/** Ideal swing-zone arc: inner “sweet” band as fraction of contact angular span. */
-const IDEAL_ZONE_CORE_FR = 0.34
-
 const CHAIN_ANGLE_RAD = 0.42
 const PIERCE_SPEED_MUL = 0.62
 const TRAIL_MAX = 22
@@ -163,15 +203,21 @@ const FLASH_PERFECT_SEND = 0.34
 const SHAKE_PERFECT = 0.22
 
 
-/** After pull-back, delay before the mound fires (readable telegraph). */
-const PITCH_ARM_DELAY_SEC = 0.32
+/**
+ * Continuous pitch stream: average seconds between mound releases (+ jitter).
+ * Independent of bat pullback / phase.
+ */
+const PITCH_CADENCE_SEC = 0.88
+const PITCH_CADENCE_JITTER_SEC = 0.2
+/** Cap simultaneous incoming balls so the plate stays readable. */
+const MAX_INCOMING_PITCHES = 3
 /** Incoming pitch speed band (px/s); fast, batting-like. */
 const PITCH_SPEED_MIN = 1260
 const PITCH_SPEED_MAX = 1680
 /** Small vertical accel on incoming ball only (shallow arc; not full gravity). */
 const PITCH_INCOMING_AY_MIN = -140
 const PITCH_INCOMING_AY_MAX = 120
-/** Wide strike-height variety on the bat (t pivot→tip); bias upward in pickPitchVariantParams. */
+/** Wide strike-height variety on the bat (t pivot→tip); bias upward in pickPitchVariantFields. */
 const PITCH_CONTACT_FR_MIN = 0.48
 const PITCH_CONTACT_FR_MAX = 0.97
 /** Pitch origin: horizontal center of scene (mound). */
@@ -182,7 +228,6 @@ const PITCH_MOUND_X_FR = 0.5
  */
 const PITCH_MOUND_Y_FR = 15 / 16
 /** Logical px: move release point up (smaller Y) toward visible mound art. */
-const PITCH_MOUND_NUDGE_UP_PX = 100
 /**
  * Incoming ball radius multiplier at release (grows to 1.0 by ideal contact time).
  */
@@ -199,10 +244,7 @@ const PITCH_RELEASE_DY_BIAS_FR = -0.0065
 /** Sweet spot: upper-mid barrel (t along bat); radius as fraction of bat length. */
 const SWEET_SPOT_T = 0.74
 const SWEET_SPOT_RADIUS_FR = 0.28
-/** Auto pitch if idle this long (s) with no ball in play. */
-const AUTO_PITCH_IDLE_SEC = 5
 /** Very forgiving plate reach — goal: more hits than empty swings. */
-const CONTACT_ZONE_R = 248
 /** Allow lower barrel / “choked up” meets; still skips pure handle. */
 const CONTACT_BARREL_T_MIN = 0.28
 /**
@@ -245,11 +287,17 @@ const EXIT_SCORE_CARRY = 0.628
 /** Batter pivot; Y smaller fraction = higher on screen, aligned with lowered gallery. */
 const BAT_PIVOT_X_FR = 0.875
 const BAT_PIVOT_Y_FR = 0.635
+
+/** Soft field contact shadow under hero (pivot space; light from upper-left). */
+const GROUND_SHADOW_OFFSET_X = 18
+const GROUND_SHADOW_OFFSET_Y = 28
+const GROUND_SHADOW_W_FR = 1.22
+const GROUND_SHADOW_H_FR = 0.26
+/** Max width stretch from full pullback (subtle). */
+const GROUND_SHADOW_PULLBACK_STRETCH = 0.048
 /** Past this offset from plate X, pitch is gone (extra px = more time to connect). */
-const BALL_PAST_PLATE_DX = 128
 
 /** Minimum grab distance from bat segment (CSS px in logical canvas space). */
-const GRAB_THRESH_BASE_PX = 52
 /** Extra half-width scales with bat length so fat/long sprite bats stay grabbable. */
 const GRAB_THRESH_BATLEN_FR = 0.3
 /** Floor from canvas size so large boards don’t feel stingy. */
@@ -258,7 +306,23 @@ const RIM_INNER_FR = 0.82
 
 type LauncherPhase = 'idle' | 'charging' | 'swing' | 'recovery'
 
-type BallRole = 'none' | 'incoming' | 'outgoing'
+type BallRole = 'none' | 'outgoing'
+
+/**
+ * One pitched ball in flight toward the plate (may coexist with other incoming
+ * pitches and with one outgoing batted ball).
+ */
+type IncomingPitch = {
+  ball: Ball
+  idealContactTime: number
+  pitchSpawnSimTime: number
+  pitchContactResolved: boolean
+  pitchContactFracT: number
+  pitchSpeedNominal: number
+  pitchIncomingAy: number
+  pitchReleaseDyPx: number
+  pitchSeq: number
+}
 
 /** Debug / HUD pitch lifecycle (not all mutually exclusive with ballRole). */
 type PitchHudState =
@@ -350,10 +414,6 @@ function isFullSendZone(p: number): boolean {
   return clamp(p, 0, 1) >= POWER_FULL_SEND
 }
 
-function isPerfectSendZone(p: number): boolean {
-  return clamp(p, 0, 1) >= POWER_PERFECT_SEND
-}
-
 function powerBarColor(p: number): string {
   const a = clamp(p, 0, 1)
   if (a < 0.5) {
@@ -409,6 +469,10 @@ type Sim = {
   /** True when every target in the exposed (above-occluder) region has wasTriggered (all rings). */
   debugAllTargetsTriggered: boolean
   ball: Ball | null
+  /** Pitches currently flying toward the plate (not including outgoing batted ball). */
+  incomingPitches: IncomingPitch[]
+  /** Seconds until next cadence spawn attempt (continuous stream). */
+  pitchNextIn: number
 
   phase: LauncherPhase
   theta: number
@@ -436,6 +500,11 @@ type Sim = {
 
   /** Tier from last valid release (swing + in-flight ball). */
   powerTierRelease: PowerTier
+  /**
+   * After a solid hit, the ball was already advanced this frame as incoming;
+   * skip one outgoing `integrateBall` so we don’t double-integrate.
+   */
+  skipOutgoingPhysicsOnce: boolean
   /** Active ball hit tier (copied at spawn). */
   ballShotTier: PowerTier
   /** Perfect full send: first hit pierces (ball survives once). */
@@ -461,27 +530,13 @@ type Sim = {
   pointer: Vec2 | null
   /** Monotonic sim clock (s) for pitch + swing timing. */
   simTime: number
-  /** World time when ball should cross the plate; -1 if none. */
-  idealContactTime: number
   /** When bat crossed the launch plane this swing; null until then. */
   batCrossLaunchTime: number | null
   /** `simTime` when swing phase started (release); spring hinge animation; null if idle/charging. */
   springSwingT0: number | null
-  /** Per-pitch: contact/miss already decided. */
-  pitchContactResolved: boolean
 
-  /** Monotonic pitch id for deterministic variation. */
+  /** Monotonic pitch id for deterministic variation (each spawn increments). */
   pitchSeq: number
-  /** Intended contact height along bat (0 pivot → 1 tip) for this pitch. */
-  pitchContactFracT: number
-  pitchSpeedNominal: number
-  /** Incoming-only vertical acceleration (shallow arc). */
-  pitchIncomingAy: number
-  pitchReleaseDyPx: number
-  /** `simTime` when current pitch left the mound; -1 if no incoming pitch. */
-  pitchSpawnSimTime: number
-  /** Seconds spent idle with no ball; triggers auto pitch. */
-  idleAutoPitchAccum: number
 
   debugLaunchDir: { x: number; y: number }
   debugPitchHud: PitchHudState
@@ -513,6 +568,15 @@ type Sim = {
   debugVerticalBandAtContact: VerticalShotBand | '—'
   debugOutcomeClassPreview: OutcomeClass | '—'
   debugOutcomeClassAtContact: OutcomeClass | '—'
+
+  /** Slow drifting cloud bonus targets (top band); separate from disc pegs. */
+  cloudTargets: CloudTarget[]
+  parachutePayloads: ParachutePayload[]
+  cloudSpawnCountdown: number
+  nextFloatingTargetId: number
+
+  /** Single responsive scale vs 1600×900 design reference. */
+  sceneLayout: SceneLayout
 }
 
 function ringMidRadius(Ro: number): number {
@@ -550,28 +614,42 @@ function layoutDiscRingRadii(minDim: number): { ro: number; ri: number }[] {
  * Front-row hub Y in logical canvas space — the single vertical anchor for the disc gallery.
  * All deeper rows are `fy - n*sy` from here; do not nudge individual rings in Y.
  */
-function galleryFrontRowAnchorY(h: number): number {
-  return h * GALLERY_FRONT_CY_FR + GALLERY_ROOT_OFFSET_Y_PX
+function galleryFrontRowAnchorY(h: number, layout: SceneLayout): number {
+  return h * GALLERY_FRONT_CY_FR + designPx(layout, GALLERY_ROOT_OFFSET_Y_DESIGN)
 }
 
 /** Front row at anchor; deeper rows offset up-left + extra left spread (px). */
-function layoutGalleryRingCenters(w: number, h: number): Vec2[] {
+function layoutGalleryRingCenters(
+  w: number,
+  h: number,
+  layout: SceneLayout
+): Vec2[] {
   const m = Math.min(w, h)
   const fx = w * GALLERY_FRONT_CX_FR
-  const fy = galleryFrontRowAnchorY(h)
+  const fy = galleryFrontRowAnchorY(h, layout)
   const sx = m * GALLERY_DEPTH_STEP_X_FR
   const sy = m * GALLERY_DEPTH_STEP_Y_FR
   return [
     { x: fx, y: fy },
-    { x: fx - sx - GALLERY_RING_SHIFT_MID_PX, y: fy - sy },
-    { x: fx - 2 * sx - GALLERY_RING_SHIFT_BACK_PX, y: fy - 2 * sy },
+    {
+      x: fx - sx - designPx(layout, GALLERY_RING_SHIFT_MID_DESIGN),
+      y: fy - sy,
+    },
+    {
+      x: fx - 2 * sx - designPx(layout, GALLERY_RING_SHIFT_BACK_DESIGN),
+      y: fy - 2 * sy,
+    },
   ]
 }
 
-function createDiscRingsForLayout(w: number, h: number): DiscWheelRing[] {
+function createDiscRingsForLayout(
+  w: number,
+  h: number,
+  layout: SceneLayout
+): DiscWheelRing[] {
   const minDim = Math.min(w, h)
   const radii = layoutDiscRingRadii(minDim)
-  const centers = layoutGalleryRingCenters(w, h)
+  const centers = layoutGalleryRingCenters(w, h, layout)
   return radii.map((dims, r) => {
     const omega = r % 2 === 0 ? RING_OMEGA : -RING_OMEGA
     const n = RING_TARGET_COUNTS[r]
@@ -591,7 +669,7 @@ function createDiscRingsForLayout(w: number, h: number): DiscWheelRing[] {
 function syncGalleryLayout(sim: Sim, w: number, h: number): void {
   const minDim = Math.min(w, h)
   const radii = layoutDiscRingRadii(minDim)
-  const centers = layoutGalleryRingCenters(w, h)
+  const centers = layoutGalleryRingCenters(w, h, sim.sceneLayout)
   for (let r = 0; r < RING_COUNT; r++) {
     sim.rings[r].radiusOuter = radii[r].ro
     sim.rings[r].radiusInner = radii[r].ri
@@ -873,15 +951,19 @@ export type DevDrawOptions = {
    * When false: no disc rendering, collisions, scoring, or disc target/occluder logic (dev only).
    */
   enableSpinningDiscs: boolean
+  /** Frame rect, hero pivot, scoreboard AABB, disc hubs + `sceneLayout.scale` readout. */
+  showSceneLayoutDebug: boolean
 }
 
 function createSim(w: number, h: number): Sim {
+  const sceneLayout = computeSceneLayout(w, h)
   const pivot: Vec2 = { x: w * BAT_PIVOT_X_FR, y: h * BAT_PIVOT_Y_FR }
   const batLen = Math.min(w, h) * 0.216
-  const rings = createDiscRingsForLayout(w, h)
-  return {
+  const rings = createDiscRingsForLayout(w, h, sceneLayout)
+  const sim: Sim = {
     w,
     h,
+    sceneLayout,
     dpr: 1,
     pivot,
     batLen,
@@ -889,6 +971,8 @@ function createSim(w: number, h: number): Sim {
     rings,
     debugAllTargetsTriggered: false,
     ball: null,
+    incomingPitches: [],
+    pitchNextIn: 0.38,
     phase: 'idle',
     theta: THETA_REST,
     omega: 0,
@@ -906,6 +990,7 @@ function createSim(w: number, h: number): Sim {
     batInterruptFlashRemain: 0,
     powerTierRelease: 'normal',
     ballShotTier: 'normal',
+    skipOutgoingPhysicsOnce: false,
     ballPierceArmed: false,
     ballNextHitMinRing: null,
     ballExitBand: 'standard',
@@ -920,17 +1005,9 @@ function createSim(w: number, h: number): Sim {
     ballTrail: [],
     pointer: null,
     simTime: 0,
-    idealContactTime: -1,
     batCrossLaunchTime: null,
     springSwingT0: null,
-    pitchContactResolved: false,
     pitchSeq: 0,
-    pitchContactFracT: SWEET_SPOT_T,
-    pitchSpeedNominal: (PITCH_SPEED_MIN + PITCH_SPEED_MAX) / 2,
-    pitchIncomingAy: (PITCH_INCOMING_AY_MIN + PITCH_INCOMING_AY_MAX) / 2,
-    pitchReleaseDyPx: 0,
-    pitchSpawnSimTime: -1,
-    idleAutoPitchAccum: 0,
     debugLaunchDir: { x: -0.92, y: -0.38 },
     debugPitchHud: 'idle',
     debugIncomingVel: null,
@@ -960,7 +1037,13 @@ function createSim(w: number, h: number): Sim {
     debugVerticalBandAtContact: '—',
     debugOutcomeClassPreview: '—',
     debugOutcomeClassAtContact: '—',
+    cloudTargets: [],
+    parachutePayloads: [],
+    cloudSpawnCountdown: 0,
+    nextFloatingTargetId: 1,
   }
+  initFloatingCloudLayer(sim)
+  return sim
 }
 
 function layoutSim(
@@ -971,6 +1054,7 @@ function layoutSim(
 ): void {
   sim.w = w
   sim.h = h
+  sim.sceneLayout = computeSceneLayout(w, h)
   if (sprites) {
     const sl = computeSpriteLayout(
       w,
@@ -978,7 +1062,8 @@ function layoutSim(
       sprites.statue,
       sprites.bat,
       sprites.statueOpaque,
-      sprites.batOpaque
+      sprites.batOpaque,
+      sim.sceneLayout
     )
     sim.spriteLayout = sl
     sim.pivot = sl.pivot
@@ -1005,7 +1090,7 @@ function pointerToLogical(
 function grabDistThreshPx(sim: Sim): number {
   const m = Math.min(sim.w, sim.h)
   return Math.max(
-    GRAB_THRESH_BASE_PX,
+    designPx(sim.sceneLayout, GRAB_THRESH_BASE_DESIGN),
     sim.batLen * GRAB_THRESH_BATLEN_FR,
     m * GRAB_THRESH_MIN_CANVAS_FR
   )
@@ -1085,17 +1170,6 @@ function powerTierFromTimingAbs(absErr: number): PowerTier {
   return 'normal'
 }
 
-/** Planned contact point on the launch-plane bat for the current pitch params. */
-function pitchPlannedContactPoint(sim: Sim): Vec2 {
-  const aimLen = Math.min(sim.batLen, sim.h * PITCH_AIM_BAT_LEN_MAX_FR)
-  return batPointAlong(
-    sim.pivot,
-    aimLen,
-    THETA_LAUNCH,
-    sim.pitchContactFracT
-  )
-}
-
 /** 1 at sweet-spot center, 0 outside radius (in bat t-space). */
 function sweetSpotQuFromT(tAlongBat: number): number {
   const d = Math.abs(tAlongBat - SWEET_SPOT_T)
@@ -1105,8 +1179,14 @@ function sweetSpotQuFromT(tAlongBat: number): number {
   return 1 - u * u
 }
 
-function pickPitchVariantParams(sim: Sim): void {
-  const n = sim.pitchSeq
+/** Pick variant params for a given pitch sequence id (each spawn uses a fresh `seq`). */
+function pickPitchVariantFields(sim: Sim, seq: number): {
+  pitchContactFracT: number
+  pitchSpeedNominal: number
+  pitchIncomingAy: number
+  pitchReleaseDyPx: number
+} {
+  const n = seq
   const m = Math.min(sim.w, sim.h)
   const a0 = pitchVariant01(n, 1)
   const a1 = pitchVariant01(n, 2)
@@ -1123,7 +1203,7 @@ function pickPitchVariantParams(sim: Sim): void {
     1
   )
   const spanT = PITCH_CONTACT_FR_MAX - PITCH_CONTACT_FR_MIN
-  sim.pitchContactFracT = clamp(
+  const pitchContactFracT = clamp(
     PITCH_CONTACT_FR_MIN +
       heightU * spanT +
       (a5 - 0.5) * 0.1 +
@@ -1131,40 +1211,81 @@ function pickPitchVariantParams(sim: Sim): void {
     PITCH_CONTACT_FR_MIN,
     PITCH_CONTACT_FR_MAX
   )
-  sim.pitchSpeedNominal =
+  const pitchSpeedNominal =
     PITCH_SPEED_MIN + a1 * (PITCH_SPEED_MAX - PITCH_SPEED_MIN)
   const aySpan = PITCH_INCOMING_AY_MAX - PITCH_INCOMING_AY_MIN
   const ayRaw = PITCH_INCOMING_AY_MIN + a2 * aySpan
   /** Strong bias to hang / ride vs dive at the hands. */
-  sim.pitchIncomingAy = ayRaw * 0.45 + PITCH_INCOMING_AY_MIN * 0.55
-  sim.pitchReleaseDyPx =
+  const pitchIncomingAy = ayRaw * 0.45 + PITCH_INCOMING_AY_MIN * 0.55
+  const pitchReleaseDyPx =
     (a3 - 0.5) * 1.45 * PITCH_RELEASE_DY_FR * m + PITCH_RELEASE_DY_BIAS_FR * m
+  return {
+    pitchContactFracT,
+    pitchSpeedNominal,
+    pitchIncomingAy,
+    pitchReleaseDyPx,
+  }
 }
 
-/** World position where the pitch spawns (mound); matches `spawnIncomingPitch`. */
-function pitchMoundScreenPoint(sim: Sim): Vec2 {
+/** Planned contact on the launch-plane bat for the given height parameter. */
+function pitchPlannedContactPoint(sim: Sim, pitchContactFracT: number): Vec2 {
+  const aimLen = Math.min(sim.batLen, sim.h * PITCH_AIM_BAT_LEN_MAX_FR)
+  return batPointAlong(
+    sim.pivot,
+    aimLen,
+    THETA_LAUNCH,
+    pitchContactFracT
+  )
+}
+
+/** World position where the pitch spawns (mound). */
+function pitchMoundScreenPoint(sim: Sim, pitchReleaseDyPx: number): Vec2 {
   return {
     x: sim.w * PITCH_MOUND_X_FR,
     y:
       sim.h * PITCH_MOUND_Y_FR +
-      sim.pitchReleaseDyPx * 0.35 -
-      PITCH_MOUND_NUDGE_UP_PX,
+      pitchReleaseDyPx * 0.35 -
+      designPx(sim.sceneLayout, PITCH_MOUND_NUDGE_UP_DESIGN),
   }
 }
 
+/** Incoming pitch whose ideal contact time is closest to now (guidance / preview). */
+function primaryIncomingForGuidance(sim: Sim): IncomingPitch | null {
+  const arr = sim.incomingPitches
+  if (!arr.length) return null
+  let best = arr[0]
+  let bestD = Math.abs(best.idealContactTime - sim.simTime)
+  for (let i = 1; i < arr.length; i++) {
+    const c = arr[i]
+    const d = Math.abs(c.idealContactTime - sim.simTime)
+    if (d < bestD) {
+      best = c
+      bestD = d
+    }
+  }
+  return best
+}
+
 /** Depth cue: radius ramps from small (“far”) to full size near the plate. */
-function updateIncomingBallDepthRadius(sim: Sim, b: Ball): void {
-  const t0 = sim.pitchSpawnSimTime
-  const t1 = sim.idealContactTime
+function updateIncomingBallDepthRadiusFor(
+  sim: Sim,
+  simTime: number,
+  pitchSpawnSimTime: number,
+  idealContactTime: number,
+  b: Ball
+): void {
+  const br = ballRadiusPx(sim)
+  const t0 = pitchSpawnSimTime
+  const t1 = idealContactTime
   if (t0 < 0 || t1 <= t0) {
-    b.r = BALL_R
+    b.r = br
     return
   }
-  const u = clamp((sim.simTime - t0) / (t1 - t0), 0, 1)
+  const u = clamp((simTime - t0) / (t1 - t0), 0, 1)
   const smooth = u * u * (3 - 2 * u)
   const mul =
     PITCH_DEPTH_START_R_MUL + (1 - PITCH_DEPTH_START_R_MUL) * smooth
-  b.r = BALL_R * mul
+  b.r = br * mul
 }
 
 function combinedTransfer(
@@ -1312,7 +1433,9 @@ function battedBallOutcome(
   /** Pivot→tip contact parameter on bat (live or planned); shapes jam vs pop. */
   contactAlongT: number,
   /** Bat angle at release (or current θ while charging for preview). */
-  chargeTheta: number
+  chargeTheta: number,
+  /** Per-pitch variant id (incoming flight’s `pitchSeq`) for aim spread hashes. */
+  variantPitchSeq: number
 ): {
   vx: number
   vy: number
@@ -1346,8 +1469,8 @@ function battedBallOutcome(
   const b = galleryPlayBounds(sim)
   const tSteer = timingSteerForBoard(timingErrorSec)
   const ch = chargePullSteer01(chargeTheta)
-  const vHash = pitchVariant01(sim.pitchSeq, 11)
-  const hHash = pitchVariant01(sim.pitchSeq + 5, 12)
+  const vHash = pitchVariant01(variantPitchSeq, 11)
+  const hHash = pitchVariant01(variantPitchSeq + 5, 12)
 
   /**
    * Vertical funnel: larger frac → higher aim on the board (stay in target band).
@@ -1534,23 +1657,23 @@ function predictNextBatCrossTime(sim: Sim): number | null {
  * (matches generous swing-window contact). Before cross, keep predicted cross vs ideal.
  */
 function predictTimingErrorForPreview(sim: Sim): number | null {
-  if (sim.idealContactTime <= 0) return null
+  const primary = primaryIncomingForGuidance(sim)
+  if (primary == null || primary.idealContactTime <= 0) return null
   if (
-    sim.ballRole === 'incoming' &&
     sim.batCrossLaunchTime != null &&
     (sim.phase === 'swing' || sim.phase === 'recovery')
   ) {
-    return sim.simTime - sim.idealContactTime
+    return sim.simTime - primary.idealContactTime
   }
   const tBat = predictNextBatCrossTime(sim)
   if (tBat == null) return null
-  return tBat - sim.idealContactTime
+  return tBat - primary.idealContactTime
 }
 
 function computePitchHud(sim: Sim): PitchHudState {
   if (sim.debugContactFlash > 0) return 'contact'
   if (sim.ballRole === 'outgoing') return 'outgoing'
-  if (sim.ballRole === 'incoming') return 'incoming'
+  if (sim.incomingPitches.length > 0) return 'incoming'
   if (sim.phase === 'charging' && sim.pointer) return 'armed'
   return 'idle'
 }
@@ -1635,21 +1758,20 @@ function drawYawedAnnulus(
 }
 
 /**
- * Always-on (non-debug) cues: contact disk, sweet band, pitch corridor, swing arc window,
- * and a “ripe” hint when the ball is near ideal contact time.
+ * Always-on (non-debug) cues: pitch corridor, contact disk, and a “ripe” hint when the ball
+ * is near ideal contact time.
  */
 function drawHittingGuidance(ctx: CanvasRenderingContext2D, sim: Sim): void {
-  if (sim.idealContactTime <= 0) return
-  const ix = pitchPlannedContactPoint(sim)
-  const p = sim.pivot
-  const L = sim.batLen
-  const mound = pitchMoundScreenPoint(sim)
+  const primary = primaryIncomingForGuidance(sim)
+  if (primary == null || primary.idealContactTime <= 0) return
+  const ix = pitchPlannedContactPoint(sim, primary.pitchContactFracT)
+  const mound = pitchMoundScreenPoint(sim, primary.pitchReleaseDyPx)
   const moundX = mound.x
   const moundY = mound.y
 
   ctx.save()
 
-  if (sim.ballRole === 'incoming' || sim.phase === 'charging') {
+  if (sim.incomingPitches.length > 0 || sim.phase === 'charging') {
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)'
     ctx.lineWidth = 16
     ctx.lineCap = 'round'
@@ -1665,141 +1787,28 @@ function drawHittingGuidance(ctx: CanvasRenderingContext2D, sim: Sim): void {
     ctx.stroke()
   }
 
-  const dtToIdeal = sim.idealContactTime - sim.simTime
-  const ripe =
-    sim.ballRole === 'incoming' &&
-    Math.abs(dtToIdeal) < TIMING_RIPE_WINDOW_SEC
+  const dtToIdeal = primary.idealContactTime - sim.simTime
+  const ripe = Math.abs(dtToIdeal) < TIMING_RIPE_WINDOW_SEC
   ctx.setLineDash([7, 6])
   ctx.strokeStyle = ripe
     ? 'rgba(255, 215, 110, 0.48)'
     : 'rgba(150, 210, 255, 0.26)'
   ctx.lineWidth = ripe ? 2.75 : 1.85
   ctx.beginPath()
-  ctx.arc(ix.x, ix.y, CONTACT_ZONE_R * 0.9, 0, Math.PI * 2)
+  ctx.arc(ix.x, ix.y, contactZoneRadiusPx(sim) * 0.9, 0, Math.PI * 2)
   ctx.stroke()
   ctx.setLineDash([])
 
-  const barLo = batPointAlong(p, L, THETA_LAUNCH, PITCH_CONTACT_FR_MIN)
-  const barHi = batPointAlong(p, L, THETA_LAUNCH, PITCH_CONTACT_FR_MAX)
-  ctx.strokeStyle = 'rgba(70, 78, 92, 0.5)'
-  ctx.lineWidth = 6.5
-  ctx.lineCap = 'round'
-  ctx.beginPath()
-  ctx.moveTo(barLo.x, barLo.y)
-  ctx.lineTo(barHi.x, barHi.y)
-  ctx.stroke()
-
-  const swLo = batPointAlong(
-    p,
-    L,
-    THETA_LAUNCH,
-    SWEET_SPOT_T - SWEET_SPOT_RADIUS_FR * 0.88
-  )
-  const swHi = batPointAlong(
-    p,
-    L,
-    THETA_LAUNCH,
-    SWEET_SPOT_T + SWEET_SPOT_RADIUS_FR * 0.88
-  )
-  ctx.strokeStyle = 'rgba(70, 255, 160, 0.78)'
-  ctx.lineWidth = 8.5
-  ctx.beginPath()
-  ctx.moveTo(swLo.x, swLo.y)
-  ctx.lineTo(swHi.x, swHi.y)
-  ctx.stroke()
-
-  const arcSteps = 16
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)'
-  ctx.lineWidth = 9
-  ctx.lineCap = 'round'
-  ctx.beginPath()
-  for (let i = 0; i <= arcSteps; i++) {
-    const u = i / arcSteps
-    const a =
-      CONTACT_THETA_LATE + u * (CONTACT_THETA_EARLY - CONTACT_THETA_LATE)
-    const x = p.x + L * 0.84 * Math.cos(a)
-    const y = p.y + L * 0.84 * Math.sin(a)
-    if (i === 0) ctx.moveTo(x, y)
-    else ctx.lineTo(x, y)
-  }
-  ctx.stroke()
-
-  if (ripe && sim.ball && sim.ballRole === 'incoming') {
+  if (ripe) {
+    const b = primary.ball
     ctx.strokeStyle = 'rgba(255, 195, 80, 0.62)'
     ctx.lineWidth = 2
     ctx.setLineDash([4, 4])
     ctx.beginPath()
-    ctx.arc(sim.ball.x, sim.ball.y, sim.ball.r + 11, 0, Math.PI * 2)
+    ctx.arc(b.x, b.y, b.r + 11, 0, Math.PI * 2)
     ctx.stroke()
     ctx.setLineDash([])
   }
-
-  ctx.restore()
-}
-
-/**
- * Soft “energy window” on the bat swing arc: valid contact θ range (warm glow, feathered).
- * Only while charging + pointer; intensity follows pullback + faint readiness pulse.
- */
-function drawIdealSwingZoneArc(ctx: CanvasRenderingContext2D, sim: Sim): void {
-  if (sim.phase !== 'charging' || !sim.pointer) return
-
-  const { pivot: p, batLen: L } = sim
-  const theta0 = CONTACT_THETA_LATE
-  const theta1 = CONTACT_THETA_EARLY
-  const steps = 56
-
-  const pull = clamp(
-    (sim.pCurrent - POWER_DEADZONE) / Math.max(1e-6, 1 - POWER_DEADZONE),
-    0,
-    1
-  )
-  const pulse = 1 + 0.055 * Math.sin(sim.simTime * 2.75)
-  const baseA = (0.22 + 0.78 * pull) * pulse
-
-  const arcPolyline = (tA: number, tB: number, n: number) => {
-    ctx.beginPath()
-    for (let i = 0; i <= n; i++) {
-      const u = i / n
-      const a = tA + u * (tB - tA)
-      const x = p.x + L * Math.cos(a)
-      const y = p.y + L * Math.sin(a)
-      if (i === 0) ctx.moveTo(x, y)
-      else ctx.lineTo(x, y)
-    }
-  }
-
-  ctx.save()
-  ctx.lineCap = 'round'
-  ctx.lineJoin = 'round'
-  ctx.globalCompositeOperation = 'lighter'
-
-  const layers: { w: number; a: number }[] = [
-    { w: 28, a: 0.07 * baseA },
-    { w: 19, a: 0.1 * baseA },
-    { w: 12, a: 0.14 * baseA },
-    { w: 6.5, a: 0.2 * baseA },
-    { w: 3.2, a: 0.28 * baseA },
-  ]
-  for (const { w, a } of layers) {
-    arcPolyline(theta0, theta1, steps)
-    ctx.strokeStyle = `rgba(255, 220, 185, ${Math.min(1, a)})`
-    ctx.lineWidth = w
-    ctx.stroke()
-  }
-
-  const mid = (theta0 + theta1) * 0.5
-  const half = (theta1 - theta0) * IDEAL_ZONE_CORE_FR * 0.5
-  const c0 = mid - half
-  const c1 = mid + half
-  arcPolyline(c0, c1, Math.ceil(steps * IDEAL_ZONE_CORE_FR) + 4)
-  ctx.strokeStyle = `rgba(255, 245, 220, ${0.22 * baseA})`
-  ctx.lineWidth = 4
-  ctx.stroke()
-  arcPolyline(c0, c1, Math.ceil(steps * IDEAL_ZONE_CORE_FR) + 4)
-  ctx.strokeStyle = `rgba(195, 235, 210, ${0.14 * baseA})`
-  ctx.lineWidth = 1.6
-  ctx.stroke()
 
   ctx.restore()
 }
@@ -1870,7 +1879,7 @@ function resolveSingleTargetHit(
   const y0 = b.y - b.vy * dt
   const x1 = b.x
   const y1 = b.y
-  const tR = targetRadiusPx(sim.w, sim.h)
+  const tR = targetRadiusPx(sim)
   const expandedR = tR + b.r
   const minRing = sim.ballNextHitMinRing ?? 0
   const { ux, uy } = flightUnitVector(b, x0, y0, x1, y1)
@@ -2002,20 +2011,26 @@ function drawPowerBar(
     fullSendLocked?: boolean
     perfectSendLocked?: boolean
     fullSendZoneLive?: boolean
-    perfectSendZoneLive?: boolean
   }
 ): void {
   const { pivot: p, batLen: L } = sim
-  const barW = clamp(L * 1.75, 112, sim.w * 0.44)
-  const barH = 13
+  const s = sim.sceneLayout.scale
+  const barW = clamp(
+    L * 2.45,
+    designPx(sim.sceneLayout, POWER_BAR_MIN_WIDTH_DESIGN),
+    sim.w * 0.58
+  )
+  const barH = designPx(sim.sceneLayout, POWER_BAR_HEIGHT_DESIGN)
   const arcTopY = p.y - L
+  const padEdge = Math.max(6, 10 * s)
   let by =
     arcTopY -
-    POWER_BAR_GAP_ABOVE_SWING_PX -
+    designPx(sim.sceneLayout, POWER_BAR_GAP_ABOVE_SWING_DESIGN) -
     barH -
-    POWER_BAR_LABEL_CLEARANCE_PX
-  by = clamp(by, 10, sim.h - barH - 14)
-  const bx = clamp(p.x - barW / 2, 8, sim.w - barW - 8)
+    designPx(sim.sceneLayout, POWER_BAR_LABEL_CLEARANCE_DESIGN) +
+    designPx(sim.sceneLayout, POWER_BAR_DROP_TOWARD_PIVOT_DESIGN)
+  by = clamp(by, padEdge, sim.h - barH - padEdge)
+  const bx = clamp(p.x - barW / 2, padEdge, sim.w - barW - padEdge)
 
   const phaseDim =
     sim.phase === 'recovery' ? 0.55 : sim.phase === 'swing' ? 0.88 : 1
@@ -2025,25 +2040,36 @@ function drawPowerBar(
 
   ctx.fillStyle = 'rgba(14, 24, 28, 0.48)'
   ctx.strokeStyle = 'rgba(95, 175, 160, 0.42)'
-  ctx.lineWidth = 1.5
+  ctx.lineWidth = Math.max(1.25, 2 * s)
   ctx.beginPath()
-  ctx.roundRect(bx, by, barW, barH, 5)
+  ctx.roundRect(bx, by, barW, barH, Math.max(4, 7 * s))
   ctx.fill()
   ctx.stroke()
 
-  if (opts?.perfectSendLocked || opts?.perfectSendZoneLive) {
+  const hiPad = Math.max(1.5, 2 * s)
+  if (opts?.perfectSendLocked) {
     ctx.strokeStyle = 'rgba(255, 140, 90, 0.52)'
-    ctx.lineWidth = opts?.perfectSendLocked ? 3 : 2
-    ctx.strokeRect(bx - 2, by - 2, barW + 4, barH + 4)
+    ctx.lineWidth = Math.max(2, 3 * s)
+    ctx.strokeRect(
+      bx - hiPad,
+      by - hiPad,
+      barW + hiPad * 2,
+      barH + hiPad * 2
+    )
   } else if (opts?.fullSendLocked || opts?.fullSendZoneLive) {
     ctx.strokeStyle = 'rgba(255, 215, 150, 0.48)'
-    ctx.lineWidth = opts?.fullSendLocked ? 2.5 : 1.75
-    ctx.strokeRect(bx - 2, by - 2, barW + 4, barH + 4)
+    ctx.lineWidth = opts?.fullSendLocked ? Math.max(2, 2.5 * s) : Math.max(1.25, 1.75 * s)
+    ctx.strokeRect(
+      bx - hiPad,
+      by - hiPad,
+      barW + hiPad * 2,
+      barH + hiPad * 2
+    )
   }
 
   const fp = clamp(fillP, 0, 1)
   if (fp > 0) {
-    const innerPad = 3.5
+    const innerPad = Math.max(3, 5 * s)
     const iw = barW - innerPad * 2
     const ih = barH - innerPad * 2
     const g = ctx.createLinearGradient(bx, by, bx + iw, by)
@@ -2057,41 +2083,134 @@ function drawPowerBar(
       by + innerPad,
       iw * fp,
       ih,
-      Math.min(4, ih * 0.45)
+      Math.min(6 * s, ih * 0.45)
     )
     ctx.fill()
     ctx.globalAlpha = phaseDim
   }
 
-  ctx.fillStyle = 'rgba(225, 248, 238, 0.88)'
-  ctx.font =
-    '600 10px "Oswald", "Arial Narrow", system-ui, sans-serif'
+  const pct = Math.round(fp * 100)
+  const mainLine = label.trim() ? `${pct}% ${label}` : `${pct}%`
+  const subLine = opts?.perfectSendLocked
+    ? 'PERFECT FULL SEND'
+    : opts?.fullSendLocked
+      ? 'FULL SEND'
+      : opts?.fullSendZoneLive
+        ? 'Full send zone'
+        : null
+
+  const padX = Math.max(6, 10 * s)
+  const cx = bx + barW / 2
   ctx.textAlign = 'center'
-  ctx.textBaseline = 'middle'
-  ctx.fillText(`${label} ${fp.toFixed(2)}`, bx + barW / 2, by + barH / 2, barW - 10)
+  if (subLine) {
+    ctx.fillStyle = 'rgba(225, 248, 238, 0.92)'
+    ctx.font = `600 ${Math.max(8, Math.round(12 * s))}px "Oswald", "Arial Narrow", system-ui, sans-serif`
+    ctx.textBaseline = 'middle'
+    ctx.fillText(mainLine, cx, by + barH * 0.34, barW - padX * 2)
+    ctx.fillStyle = 'rgba(255, 210, 175, 0.9)'
+    ctx.font = `600 ${Math.max(7, Math.round(9 * s))}px "Oswald", system-ui, sans-serif`
+    ctx.fillText(subLine, cx, by + barH * 0.72, barW - padX * 2)
+  } else {
+    ctx.fillStyle = 'rgba(225, 248, 238, 0.9)'
+    ctx.font = `600 ${Math.max(9, Math.round(13 * s))}px "Oswald", "Arial Narrow", system-ui, sans-serif`
+    ctx.textBaseline = 'middle'
+    ctx.fillText(mainLine, cx, by + barH / 2, barW - padX * 2)
+  }
   ctx.textAlign = 'left'
 
-  if (opts?.perfectSendLocked) {
-    ctx.fillStyle = 'rgba(255, 195, 155, 0.9)'
-    ctx.font = '600 10px "Oswald", system-ui, sans-serif'
-    ctx.textBaseline = 'bottom'
-    ctx.fillText('PERFECT FULL SEND', bx, by - 3)
-  } else if (opts?.fullSendLocked) {
-    ctx.fillStyle = 'rgba(255, 230, 190, 0.88)'
-    ctx.font = '600 10px "Oswald", system-ui, sans-serif'
-    ctx.textBaseline = 'bottom'
-    ctx.fillText('FULL SEND', bx, by - 3)
-  } else if (opts?.perfectSendZoneLive) {
-    ctx.fillStyle = 'rgba(255, 200, 160, 0.82)'
-    ctx.font = '600 9px "Oswald", system-ui, sans-serif'
-    ctx.textBaseline = 'bottom'
-    ctx.fillText('perfect send', bx, by - 2)
-  } else if (opts?.fullSendZoneLive) {
-    ctx.fillStyle = 'rgba(255, 225, 185, 0.78)'
-    ctx.font = '600 9px "Oswald", system-ui, sans-serif'
-    ctx.textBaseline = 'bottom'
-    ctx.fillText('full send', bx, by - 2)
+  ctx.restore()
+}
+
+/** Temporary: verify all gameplay uses `sceneLayout.scale` + design-space offsets. */
+function drawSceneLayoutDebug(ctx: CanvasRenderingContext2D, sim: Sim): void {
+  const { w, h } = sim
+  const s = sim.sceneLayout.scale
+  ctx.save()
+  ctx.strokeStyle = 'rgba(0, 255, 140, 0.55)'
+  ctx.lineWidth = Math.max(1, 2 * s)
+  ctx.strokeRect(0.5, 0.5, w - 1, h - 1)
+  ctx.fillStyle = 'rgba(0, 255, 140, 0.9)'
+  ctx.font = `${Math.max(8, Math.round(11 * s))}px ui-monospace, monospace`
+  ctx.textAlign = 'left'
+  ctx.fillText(
+    `scene scale ${s.toFixed(3)}  design ${DESIGN_REF_W}×${DESIGN_REF_H}`,
+    8,
+    14 * s + 10
+  )
+
+  ctx.fillStyle = 'rgba(255, 60, 200, 0.95)'
+  ctx.beginPath()
+  ctx.arc(sim.pivot.x, sim.pivot.y, Math.max(3, 5 * s), 0, Math.PI * 2)
+  ctx.fill()
+
+  const sb = getScoreboardScreenRect(w, h, {
+    score: sim.score,
+    timedMode: sim.timedMode,
+    timerRemainingSec: sim.timerRemainingSec,
+    comboMultiplier: sim.comboMultiplier,
+  }, s)
+  ctx.strokeStyle = 'rgba(120, 210, 255, 0.85)'
+  ctx.lineWidth = Math.max(1, 1.5 * s)
+  ctx.strokeRect(sb.x, sb.y, sb.width, sb.height)
+
+  for (const ring of sim.rings) {
+    ctx.strokeStyle = 'rgba(255, 210, 100, 0.9)'
+    ctx.beginPath()
+    ctx.arc(ring.center.x, ring.center.y, Math.max(2, 4 * s), 0, Math.PI * 2)
+    ctx.stroke()
   }
+  ctx.restore()
+}
+
+/**
+ * Diffuse ground-plane shadow under statue + bat: wide soft ellipse, stable (no bat θ).
+ */
+function drawGroundContactShadow(
+  ctx: CanvasRenderingContext2D,
+  sim: Sim
+): void {
+  if (!sim.spriteLayout) return
+
+  const { pivot: p, batLen: L } = sim
+  const pullU =
+    sim.phase === 'charging'
+      ? sim.pCurrent
+      : sim.phase === 'swing' || sim.phase === 'recovery'
+        ? sim.pRelease
+        : 0
+  const wScale = 1 + GROUND_SHADOW_PULLBACK_STRETCH * clamp(pullU, 0, 1)
+  const rx = L * GROUND_SHADOW_W_FR * 0.5 * wScale
+  const ry = L * GROUND_SHADOW_H_FR * 0.5
+  const s = sim.sceneLayout.scale
+  const cx = p.x + designPx(sim.sceneLayout, GROUND_SHADOW_OFFSET_X)
+  const cy = p.y + designPx(sim.sceneLayout, GROUND_SHADOW_OFFSET_Y)
+
+  ctx.save()
+  ctx.globalCompositeOperation = 'source-over'
+
+  const drawBlob = (
+    blurPx: number,
+    rxa: number,
+    rya: number,
+    centerA: number,
+    midA: number,
+    edgeA: number
+  ) => {
+    ctx.filter = `blur(${blurPx}px)`
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(rxa, rya) * 1.15)
+    g.addColorStop(0, `rgba(12, 16, 26, ${centerA})`)
+    g.addColorStop(0.42, `rgba(10, 14, 24, ${midA})`)
+    g.addColorStop(0.78, `rgba(8, 12, 22, ${edgeA * 0.35})`)
+    g.addColorStop(1, 'rgba(6, 10, 20, 0)')
+    ctx.fillStyle = g
+    ctx.beginPath()
+    ctx.ellipse(cx, cy, rxa, rya, 0, 0, Math.PI * 2)
+    ctx.fill()
+  }
+
+  drawBlob(22 * s, rx * 1.32, ry * 1.12, 0.11, 0.055, 0.02)
+  drawBlob(12 * s, rx * 0.88, ry * 0.82, 0.16, 0.075, 0.03)
+  ctx.filter = 'none'
 
   ctx.restore()
 }
@@ -2123,6 +2242,16 @@ function drawReleaseFlash(ctx: CanvasRenderingContext2D, sim: Sim): void {
   ctx.restore()
 }
 
+type DynamicBallDrawOpts = {
+  streakMul?: number
+  smearThreshold?: number
+  motionBlurSteps?: number
+  speedLines?: boolean
+  redFlames?: boolean
+  stretchMul?: number
+  brightBall?: boolean
+}
+
 /** Draw ball with velocity-aligned stretch + backward smear (reads as blur in motion). */
 function drawDynamicBall(
   ctx: CanvasRenderingContext2D,
@@ -2134,25 +2263,41 @@ function drawDynamicBall(
   fillStyle: string,
   strokeStyle: string,
   lineWidth: number,
-  stroke: boolean
+  stroke: boolean,
+  opts?: DynamicBallDrawOpts
 ): number {
+  const smearThreshold = opts?.smearThreshold ?? 55
+  const streakMul = opts?.streakMul ?? 1
+  const blurSteps = Math.min(
+    10,
+    Math.max(3, opts?.motionBlurSteps ?? BALL_MOTION_BLUR_STEPS)
+  )
+  const stretchMul = opts?.stretchMul ?? 1
+  const brightBall = opts?.brightBall ?? false
+
   const sp = Math.hypot(vx, vy)
   const angle = sp > 12 ? Math.atan2(vy, vx) : 0
   const u = sp > 12 ? Math.min(sp / BALL_STRETCH_SPEED_REF, 1) : 0
-  const stretch = 1 + u * BALL_STRETCH_MAX
+  const stretch = Math.min(1 + u * BALL_STRETCH_MAX * stretchMul, 1.92)
   const squash = 1 / Math.sqrt(stretch)
 
-  if (sp > 55) {
+  if (sp > smearThreshold) {
     const ux = vx / sp
     const uy = vy / sp
-    const streakPx = Math.min(r * 1.1 + sp * 0.018, r * 4.2)
+    const streakPx =
+      Math.min(r * 1.1 + sp * 0.018, r * 4.2) * streakMul +
+      (opts?.speedLines ? sp * 0.014 : 0)
     ctx.save()
-    for (let i = BALL_MOTION_BLUR_STEPS; i >= 1; i--) {
-      const t = i / BALL_MOTION_BLUR_STEPS
+    for (let i = blurSteps; i >= 1; i--) {
+      const t = i / blurSteps
       const px = x - ux * streakPx * t * 0.92
       const py = y - uy * streakPx * t * 0.92
       const tr = r * (0.88 + 0.12 * (1 - t)) * (0.92 + 0.08 * squash)
-      const ga = 0.11 * (1 - t * 0.75) * Math.min(sp / 320, 1)
+      const ga =
+        0.11 *
+        (1 - t * 0.75) *
+        Math.min(sp / 320, 1) *
+        (brightBall ? 1.22 : 1)
       ctx.globalAlpha = ga
       ctx.fillStyle = fillStyle
       ctx.beginPath()
@@ -2162,12 +2307,42 @@ function drawDynamicBall(
     ctx.restore()
   }
 
+  if (opts?.speedLines && sp > 32) {
+    const ux = vx / sp
+    const uy = vy / sp
+    const px = -uy
+    const py = ux
+    ctx.save()
+    ctx.lineCap = 'round'
+    const n = 8
+    const baseLen = r * (1.35 + Math.min(sp / 340, 2.9))
+    const vis = Math.min(sp / 750, 1)
+    for (let k = 0; k < n; k++) {
+      const side = ((k - (n - 1) / 2) * r * 0.21) / Math.max(squash, 0.65)
+      const back = r * 0.28
+      const sx = x - ux * back + px * side
+      const sy = y - uy * back + py * side
+      const len = baseLen * (0.5 + (k % 4) * 0.18)
+      const ex = sx - ux * len
+      const ey = sy - uy * len
+      ctx.strokeStyle = `rgba(250, 252, 255, ${0.22 + 0.52 * vis})`
+      ctx.lineWidth = 0.85 + vis * 1.45
+      ctx.beginPath()
+      ctx.moveTo(sx, sy)
+      ctx.lineTo(ex, ey)
+      ctx.stroke()
+    }
+    ctx.restore()
+  }
+
   ctx.save()
   ctx.translate(x, y)
   ctx.rotate(angle)
   ctx.scale(stretch, squash)
-  ctx.shadowBlur = 4 + Math.min(sp / 140, 10)
-  ctx.shadowColor = 'rgba(0, 0, 0, 0.35)'
+  ctx.shadowBlur = (brightBall ? 6 : 4) + Math.min(sp / 140, 10)
+  ctx.shadowColor = brightBall
+    ? 'rgba(100, 160, 255, 0.42)'
+    : 'rgba(0, 0, 0, 0.35)'
   ctx.beginPath()
   ctx.arc(0, 0, r, 0, Math.PI * 2)
   ctx.fillStyle = fillStyle
@@ -2179,6 +2354,38 @@ function drawDynamicBall(
     ctx.stroke()
   }
   ctx.restore()
+
+  if (opts?.redFlames && sp > 120) {
+    const ux = vx / sp
+    const uy = vy / sp
+    const px = -uy
+    const py = ux
+    const fInt = Math.min((sp - 120) / 400, 1)
+    for (let k = 0; k < 6; k++) {
+      const spread = (k / 5 - 0.5) * r * 1.05
+      ctx.save()
+      const ox = x - ux * r * 0.52 + px * spread
+      const oy = y - uy * r * 0.52 + py * spread * 0.25
+      ctx.translate(ox, oy)
+      ctx.rotate(angle + Math.PI)
+      const grd = ctx.createLinearGradient(
+        0,
+        -r * 0.2,
+        0,
+        r * (1.6 + fInt * 0.6)
+      )
+      grd.addColorStop(0, `rgba(255, 40, 20, ${0.55 + fInt * 0.3})`)
+      grd.addColorStop(0.35, `rgba(255, 100, 30, ${0.35 * fInt + 0.15})`)
+      grd.addColorStop(1, 'rgba(255, 220, 120, 0)')
+      ctx.fillStyle = grd
+      ctx.beginPath()
+      ctx.moveTo(0, 0)
+      ctx.quadraticCurveTo(r * 0.42, r * 0.75, 0, r * (1.15 + fInt * 0.45))
+      ctx.quadraticCurveTo(-r * 0.42, r * 0.75, 0, 0)
+      ctx.fill()
+      ctx.restore()
+    }
+  }
 
   return r * Math.max(stretch, 1 / squash)
 }
@@ -2212,7 +2419,7 @@ function drawBallTrail(ctx: CanvasRenderingContext2D, sim: Sim): void {
     } else if (tier === 'full_send') {
       ctx.fillStyle = `rgba(255, 200, 100, ${alpha})`
     } else {
-      ctx.fillStyle = `rgba(180, 200, 220, ${alpha * 0.7})`
+      ctx.fillStyle = `rgba(248, 252, 255, ${alpha * 0.82})`
     }
     const dx = pt.x - prev.x
     const dy = pt.y - prev.y
@@ -2231,138 +2438,12 @@ function drawBallTrail(ctx: CanvasRenderingContext2D, sim: Sim): void {
   }
 }
 
-function drawDebugOverlay(
-  ctx: CanvasRenderingContext2D,
+/** Launcher telemetry for dev panel (never drawn on the gameplay canvas). */
+function buildLauncherDebugHudLines(
   sim: Sim,
   spinningDiscsEnabled: boolean
-): void {
-  const { pivot: p, batLen: L } = sim
-  const tip = batTip(p, L, sim.theta)
+): string[] {
   const thetaVisDeg = (sim.theta * 180) / Math.PI
-  const ix = pitchPlannedContactPoint(sim)
-  const predVel = sim.debugPredictedPostHitVel
-  const predMag = predVel != null ? Math.hypot(predVel.x, predVel.y) : 0
-  const predDir =
-    predVel != null && predMag > 1e-3
-      ? { x: predVel.x / predMag, y: predVel.y / predMag }
-      : sim.debugLaunchDir
-
-  const segs = 64
-  const strokeArc = (
-    theta0: number,
-    theta1: number,
-    color: string,
-    width: number
-  ) => {
-    ctx.strokeStyle = color
-    ctx.lineWidth = width
-    ctx.beginPath()
-    const steps = Math.max(
-      8,
-      Math.ceil((Math.abs(theta1 - theta0) / Math.PI) * segs)
-    )
-    for (let i = 0; i <= steps; i++) {
-      const u = i / steps
-      const a = theta0 + u * (theta1 - theta0)
-      const x = p.x + L * Math.cos(a)
-      const y = p.y + L * Math.sin(a)
-      if (i === 0) ctx.moveTo(x, y)
-      else ctx.lineTo(x, y)
-    }
-    ctx.stroke()
-  }
-
-  ctx.save()
-  strokeArc(THETA_LEFT, THETA_RIGHT, 'rgba(100,100,100,0.35)', 2)
-  strokeArc(THETA_CHARGE_MIN, THETA_CHARGE_MAX, 'rgba(130, 205, 175, 0.55)', 4)
-  strokeArc(
-    CONTACT_THETA_LATE,
-    CONTACT_THETA_EARLY,
-    'rgba(255, 210, 175, 0.4)',
-    7
-  )
-
-  ctx.fillStyle = '#0af'
-  ctx.beginPath()
-  ctx.arc(p.x, p.y, 6, 0, Math.PI * 2)
-  ctx.fill()
-
-  ctx.fillStyle = '#fa0'
-  ctx.beginPath()
-  ctx.arc(tip.x, tip.y, 5, 0, Math.PI * 2)
-  ctx.fill()
-
-  ctx.strokeStyle = 'rgba(160, 220, 195, 0.42)'
-  ctx.lineWidth = 1.5
-  ctx.setLineDash([4, 4])
-  ctx.beginPath()
-  ctx.arc(ix.x, ix.y, CONTACT_ZONE_R, 0, Math.PI * 2)
-  ctx.stroke()
-  ctx.setLineDash([])
-
-  ctx.fillStyle = 'rgba(255, 220, 80, 0.9)'
-  ctx.beginPath()
-  ctx.arc(ix.x, ix.y, 4, 0, Math.PI * 2)
-  ctx.fill()
-
-  const barLo = batPointAlong(p, L, THETA_LAUNCH, PITCH_CONTACT_FR_MIN)
-  const barHi = batPointAlong(p, L, THETA_LAUNCH, PITCH_CONTACT_FR_MAX)
-  const swPt = batPointAlong(p, L, THETA_LAUNCH, SWEET_SPOT_T)
-  ctx.strokeStyle = 'rgba(255, 200, 120, 0.65)'
-  ctx.lineWidth = 5
-  ctx.lineCap = 'round'
-  ctx.beginPath()
-  ctx.moveTo(barLo.x, barLo.y)
-  ctx.lineTo(barHi.x, barHi.y)
-  ctx.stroke()
-  ctx.fillStyle = 'rgba(120, 255, 180, 0.95)'
-  ctx.beginPath()
-  ctx.arc(swPt.x, swPt.y, 5, 0, Math.PI * 2)
-  ctx.fill()
-
-  const arrowLen = L * 0.5
-  ctx.strokeStyle = 'rgba(185, 235, 205, 0.85)'
-  ctx.lineWidth = 2
-  ctx.beginPath()
-  ctx.moveTo(ix.x, ix.y)
-  ctx.lineTo(ix.x + predDir.x * arrowLen, ix.y + predDir.y * arrowLen)
-  ctx.stroke()
-
-  ctx.strokeStyle = 'rgba(255, 100, 255, 0.75)'
-  ctx.lineWidth = 1.5
-  ctx.setLineDash([3, 3])
-  ctx.beginPath()
-  ctx.moveTo(tip.x, tip.y)
-  ctx.lineTo(
-    tip.x + Math.cos(sim.theta) * arrowLen * 0.75,
-    tip.y + Math.sin(sim.theta) * arrowLen * 0.75
-  )
-  ctx.stroke()
-  ctx.setLineDash([])
-
-  if (sim.ball) {
-    const bv = Math.hypot(sim.ball.vx, sim.ball.vy) || 1
-    const nx = sim.ball.vx / bv
-    const ny = sim.ball.vy / bv
-    ctx.strokeStyle = '#f0f'
-    ctx.lineWidth = 2
-    ctx.beginPath()
-    ctx.moveTo(sim.ball.x, sim.ball.y)
-    ctx.lineTo(sim.ball.x + nx * 90, sim.ball.y + ny * 90)
-    ctx.stroke()
-    if (sim.ballRole === 'outgoing' && bv > 35) {
-      const rayLen = Math.min(240, 38 + bv * 0.22)
-      ctx.strokeStyle = 'rgba(165, 228, 195, 0.45)'
-      ctx.lineWidth = 1.25
-      ctx.setLineDash([5, 6])
-      ctx.beginPath()
-      ctx.moveTo(sim.ball.x, sim.ball.y)
-      ctx.lineTo(sim.ball.x + nx * rayLen, sim.ball.y + ny * rayLen)
-      ctx.stroke()
-      ctx.setLineDash([])
-    }
-  }
-
   const fLive = powerToSpeedFactor(sim.pCurrent)
   const fRel = powerToSpeedFactor(sim.pRelease)
   const ballSp =
@@ -2384,8 +2465,11 @@ function drawDebugOverlay(
   const cpStr =
     cp != null ? `(${cp.x.toFixed(0)}, ${cp.y.toFixed(0)})` : '—'
 
+  const prim = primaryIncomingForGuidance(sim)
   const idealStr =
-    sim.idealContactTime > 0 ? sim.idealContactTime.toFixed(3) : '—'
+    prim != null && prim.idealContactTime > 0
+      ? prim.idealContactTime.toFixed(3)
+      : '—'
   const swingStr =
     sim.debugSwingCrossTime != null
       ? sim.debugSwingCrossTime.toFixed(3)
@@ -2427,11 +2511,15 @@ function drawDebugOverlay(
     sim.debugTimingErrorSec != null
       ? contactQuality01(sim.debugTimingErrorSec).toFixed(2)
       : '—'
+  const pvLine =
+    prim != null
+      ? `pitch v: ${prim.pitchSpeedNominal.toFixed(0)}  incoming ay: ${prim.pitchIncomingAy.toFixed(0)}  frT: ${prim.pitchContactFracT.toFixed(2)}  relDy: ${prim.pitchReleaseDyPx.toFixed(1)}`
+      : 'pitch v: —  (no primary incoming)'
   const lines = [
-    `pitch: ${sim.debugPitchHud}  ballRole: ${sim.ballRole}  arm: ${sim.pitchArmElapsed.toFixed(2)}s  auto:${sim.debugAutoPitch ? 'Y' : 'n'}`,
-    `pitch v: ${sim.pitchSpeedNominal.toFixed(0)}  incoming ay: ${sim.pitchIncomingAy.toFixed(0)}  frT: ${sim.pitchContactFracT.toFixed(2)}  relDy: ${sim.pitchReleaseDyPx.toFixed(1)}`,
+    `pitch: ${sim.debugPitchHud}  ballRole: ${sim.ballRole}  incoming#: ${sim.incomingPitches.length}  next:${sim.pitchNextIn.toFixed(2)}s  auto:${sim.debugAutoPitch ? 'Y' : 'n'}`,
+    pvLine,
     `sweetQ prev: ${sim.debugSweetQPreview.toFixed(2)}  @hit: ${sim.debugSweetQAtContact.toFixed(2)}  batT: ${sim.debugContactAlongT.toFixed(2)}`,
-    `xfer: ${sim.debugTransferEff.toFixed(2)}  pullU@hit: ${sim.debugPullbackUAtContact.toFixed(2)}  idle: ${sim.idleAutoPitchAccum.toFixed(2)}s`,
+    `xfer: ${sim.debugTransferEff.toFixed(2)}  pullU@hit: ${sim.debugPullbackUAtContact.toFixed(2)}  arm: ${sim.pitchArmElapsed.toFixed(2)}s`,
     `exit prev: ${sim.debugExitBandPreview}  last: ${sim.debugLastExitBand}  g×: ${sim.ballOutgoingGravityMul.toFixed(2)}`,
     `V-band: prev ${sim.debugVerticalBandPreview}  @hit ${sim.debugVerticalBandAtContact}  class: prev ${sim.debugOutcomeClassPreview}  @hit ${sim.debugOutcomeClassAtContact}`,
     `timingQ (0–1): prev ${timingQPreviewStr}  @hit ${timingQHitStr}`,
@@ -2446,8 +2534,8 @@ function drawDebugOverlay(
     `p (live): ${sim.pCurrent.toFixed(2)}  f(p): ${fLive.toFixed(3)}`,
     `p_release: ${sim.pRelease.toFixed(2)}  f(p): ${fRel.toFixed(3)}`,
     `|ball|: ${ballSp}  batted v (pred HUD): ${
-      predVel != null
-        ? `(${predVel.x.toFixed(0)}, ${predVel.y.toFixed(0)})`
+      pred != null
+        ? `(${pred.x.toFixed(0)}, ${pred.y.toFixed(0)})`
         : '(—, —)'
     }`,
     `g_in: ${GRAVITY}  g_out: ${OUTGOING_GRAVITY}`,
@@ -2475,69 +2563,62 @@ function drawDebugOverlay(
     )
   }
 
-  ctx.font = '12px ui-monospace, monospace'
-  ctx.fillStyle = 'rgba(0,0,0,0.82)'
-  const pad = 8
-  const lh = 14
-  const tw = Math.max(...lines.map((s) => ctx.measureText(s).width)) + pad * 2
-  const th = lines.length * lh + pad * 2
-  ctx.fillRect(8, 8, tw, th)
-  ctx.fillStyle = '#eee'
-  lines.forEach((line, i) => {
-    ctx.fillText(line, 8 + pad, 8 + pad + (i + 1) * lh - 4)
-  })
-  ctx.restore()
+  if (GALLERY_DEBUG_GUIDE_PRE_SHIFT_Y) {
+    const guideY = sim.h * GALLERY_FRONT_CY_FR
+    lines.unshift(
+      `[gallery] pre-shift anchor screen Y ≈ ${guideY.toFixed(1)} (GALLERY_DEBUG_GUIDE_PRE_SHIFT_Y)`
+    )
+  }
+
+  return lines
+}
+
+function nextPitchCadenceInterval(sim: Sim): number {
+  const jitter =
+    (pitchVariant01(sim.pitchSeq, 77) - 0.5) * 2 * PITCH_CADENCE_JITTER_SEC
+  return Math.max(0.14, PITCH_CADENCE_SEC + jitter)
 }
 
 /** Fire one pitch from mound toward the planned barrel contact point. */
-function spawnIncomingPitch(sim: Sim, opts?: { auto?: boolean }): void {
-  if (sim.ball != null) return
+function trySpawnIncomingPitch(sim: Sim, opts?: { auto?: boolean }): void {
+  if (sim.incomingPitches.length >= MAX_INCOMING_PITCHES) return
   sim.pitchSeq += 1
-  pickPitchVariantParams(sim)
+  const seq = sim.pitchSeq
+  const variant = pickPitchVariantFields(sim, seq)
   sim.debugAutoPitch = opts?.auto ?? false
 
-  const target = pitchPlannedContactPoint(sim)
-  const start = pitchMoundScreenPoint(sim)
+  const target = pitchPlannedContactPoint(sim, variant.pitchContactFracT)
+  const start = pitchMoundScreenPoint(sim, variant.pitchReleaseDyPx)
   const dx = target.x - start.x
   const dy = target.y - start.y
   const len = Math.hypot(dx, dy) || 1
-  const sp = sim.pitchSpeedNominal
+  const sp = variant.pitchSpeedNominal
   const vx = (dx / len) * sp
   const vy = (dy / len) * sp
-  sim.ball = {
-    x: start.x,
-    y: start.y,
-    vx,
-    vy,
-    r: BALL_R * PITCH_DEPTH_START_R_MUL,
-  }
-  sim.ballRole = 'incoming'
-  sim.pitchSpawnSimTime = sim.simTime
-  sim.ballShotTier = 'normal'
-  sim.ballPierceArmed = false
-  sim.ballNextHitMinRing = null
-  sim.ballExitBand = 'standard'
-  sim.ballOutgoingGravityMul = 1
-  sim.ballTrail = []
   const travelSec =
     Math.abs(vx) > 80 ? (target.x - start.x) / vx : len / sp
-  sim.idealContactTime = sim.simTime + clamp(travelSec, 0.06, 1.35)
-  sim.pitchContactResolved = false
-  sim.batCrossLaunchTime = null
-  sim.idleAutoPitchAccum = 0
+  const idealContactTime = sim.simTime + clamp(travelSec, 0.06, 1.35)
+
+  sim.incomingPitches.push({
+    ball: {
+      x: start.x,
+      y: start.y,
+      vx,
+      vy,
+      r: ballRadiusPx(sim) * PITCH_DEPTH_START_R_MUL,
+    },
+    idealContactTime,
+    pitchSpawnSimTime: sim.simTime,
+    pitchContactResolved: false,
+    pitchContactFracT: variant.pitchContactFracT,
+    pitchSpeedNominal: variant.pitchSpeedNominal,
+    pitchIncomingAy: variant.pitchIncomingAy,
+    pitchReleaseDyPx: variant.pitchReleaseDyPx,
+    pitchSeq: seq,
+  })
   sim.debugHitCandidateCount = 0
   sim.debugHitWinnerLine = ''
   sim.debugHitCandidateLines = []
-}
-
-function clearIncomingPitch(sim: Sim): void {
-  if (sim.ballRole !== 'incoming') return
-  sim.ball = null
-  sim.ballTrail = []
-  sim.ballRole = 'none'
-  sim.idealContactTime = -1
-  sim.pitchSpawnSimTime = -1
-  sim.pitchContactResolved = false
 }
 
 let lastSpriteThetaLogMs = 0
@@ -2554,6 +2635,7 @@ export function GameCanvas() {
     showSpriteDebug: false,
     transparencyUnderlayTest: false,
     enableSpinningDiscs: true,
+    showSceneLayoutDebug: false,
   })
 
   const [devToolsOpen, setDevToolsOpen] = useState(false)
@@ -2564,17 +2646,27 @@ export function GameCanvas() {
   const [transparencyUnderlayTest, setTransparencyUnderlayTest] =
     useState(false)
   const [enableSpinningDiscs, setEnableSpinningDiscs] = useState(true)
+  const [showSceneLayoutDebug, setShowSceneLayoutDebug] = useState(false)
   const [, setSpritesRevision] = useState(0)
   const boardAspectRef = useRef(FALLBACK_BOARD_ASPECT)
+  const [devToolsHostEl, setDevToolsHostEl] = useState<HTMLElement | null>(null)
+  const launcherHudPreRef = useRef<HTMLPreElement | null>(null)
 
   const resize = useCallback(() => {
     const container = containerRef.current
     const canvas = canvasRef.current
     if (!container || !canvas) return
 
-    const vw = container.clientWidth
-    const vh = container.clientHeight
-    if (vw <= 0 || vh <= 0) return
+    const frame = readPlayfieldFrameBudgetPx()
+    const measureEl = document.getElementById('game-max-fit-rect')
+    let vw = measureEl?.clientWidth ?? 0
+    let vh = measureEl?.clientHeight ?? 0
+    if (vw <= 0 || vh <= 0) {
+      vw = Math.max(1, window.innerWidth - 48)
+      vh = Math.max(1, window.innerHeight - 48)
+    }
+    vw = Math.max(1, vw - frame.x)
+    vh = Math.max(1, vh - frame.y)
 
     const aspect = boardAspectRef.current
     let w: number
@@ -2590,14 +2682,26 @@ export function GameCanvas() {
     const dpr = Math.min(window.devicePixelRatio ?? 1, 2)
     canvas.style.width = `${w}px`
     canvas.style.height = `${h}px`
+    canvas.style.backgroundColor = STAGE_VOID_HEX
     canvas.width = Math.round(w * dpr)
     canvas.height = Math.round(h * dpr)
+
+    container.style.width = `${w}px`
+    container.style.height = `${h}px`
 
     if (!simRef.current) {
       simRef.current = createSim(w, h)
     }
     layoutSim(simRef.current, w, h, spritesRef.current)
     simRef.current.dpr = dpr
+    if (devDrawOptionsRef.current.showSceneLayoutDebug) {
+      console.debug(
+        '[scene] scale',
+        simRef.current.sceneLayout.scale.toFixed(4),
+        'logical',
+        `${w.toFixed(0)}×${h.toFixed(0)}`
+      )
+    }
   }, [])
 
   useEffect(() => {
@@ -2627,13 +2731,18 @@ export function GameCanvas() {
   useEffect(() => {
     resize()
     const ro = new ResizeObserver(() => resize())
-    if (containerRef.current) ro.observe(containerRef.current)
+    const measureEl = document.getElementById('game-max-fit-rect')
+    if (measureEl) ro.observe(measureEl)
     window.addEventListener('resize', resize)
     return () => {
       ro.disconnect()
       window.removeEventListener('resize', resize)
     }
   }, [resize])
+
+  useLayoutEffect(() => {
+    setDevToolsHostEl(document.getElementById('game-dev-tools-host'))
+  }, [])
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current
@@ -2644,7 +2753,7 @@ export function GameCanvas() {
     if (!ctx) return
 
     const { w, h, dpr } = sim
-    const targetRDraw = targetRadiusPx(w, h)
+    const targetRDraw = targetRadiusPx(sim)
     let sx = 0
     let sy = 0
     if (sim.shakeRemain > 0) {
@@ -2658,6 +2767,12 @@ export function GameCanvas() {
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.clearRect(0, 0, canvas.width, canvas.height)
     ctx.setTransform(dpr, 0, 0, dpr, sx * dpr, sy * dpr)
+    ctx.globalAlpha = 1
+    ctx.globalCompositeOperation = 'source-over'
+    ctx.filter = 'none'
+    /* Opaque void under the whole logical board so letterboxing / compositor never flashes white. */
+    ctx.fillStyle = STAGE_VOID_HEX
+    ctx.fillRect(0, 0, w, h)
 
     /* Dev-only: not a scene background — underlay to verify PNG alpha vs stadium. */
     if (dev.transparencyUnderlayTest) {
@@ -2746,6 +2861,8 @@ export function GameCanvas() {
       ctx.restore()
     }
 
+    drawFloatingCloudLayer(ctx, sim)
+
     if (sim.spriteLayout) {
       drawAtmosphericBackGlow(
         ctx,
@@ -2757,6 +2874,8 @@ export function GameCanvas() {
         sim.omega
       )
     }
+
+    drawGroundContactShadow(ctx, sim)
 
     drawHittingGuidance(ctx, sim)
 
@@ -2805,31 +2924,29 @@ export function GameCanvas() {
           omega: sim.omega,
         },
         Math.min(w, h),
-        { debug: dev.showSpriteDebug }
+        {
+          debug: dev.showSpriteDebug,
+          layoutScale: sim.sceneLayout.scale,
+        }
       )
     }
     if (sprites?.statue && sim.spriteLayout) {
       drawStatueSprite(ctx, sprites.statue, sim.spriteLayout)
     }
-    if (sprites?.bat && sim.spriteLayout) {
-      drawBatSprite(ctx, sprites.bat, sim.spriteLayout, sim.theta)
-    }
-
-    if (sim.phase === 'charging' && sim.pointer) {
-      drawIdealSwingZoneArc(ctx, sim)
-    }
 
     if (sim.phase === 'charging') {
-      const pz = isPerfectSendZone(sim.pCurrent)
       drawPowerBar(ctx, sim, sim.pCurrent, 'power', {
-        fullSendZoneLive: isFullSendZone(sim.pCurrent) && !pz,
-        perfectSendZoneLive: pz,
+        fullSendZoneLive: isFullSendZone(sim.pCurrent),
       })
     } else if (sim.phase === 'swing' || sim.phase === 'recovery') {
-      drawPowerBar(ctx, sim, sim.pRelease, 'locked', {
+      drawPowerBar(ctx, sim, sim.pRelease, '', {
         fullSendLocked: sim.powerTierRelease === 'full_send',
         perfectSendLocked: sim.powerTierRelease === 'perfect_full_send',
       })
+    }
+
+    if (sprites?.bat && sim.spriteLayout) {
+      drawBatSprite(ctx, sprites.bat, sim.spriteLayout, sim.theta)
     }
 
     if (sim.spriteLayout) {
@@ -2843,48 +2960,41 @@ export function GameCanvas() {
       )
     }
 
-    if (sim.ball) {
+    for (const inc of sim.incomingPitches) {
+      const b = inc.ball
+      const fill = '#f2e6d8'
+      const stroke = 'rgba(200, 120, 60, 0.75)'
+      drawDynamicBall(ctx, b.x, b.y, b.r, b.vx, b.vy, fill, stroke, 2, true)
+    }
+
+    if (sim.ball && sim.ballRole === 'outgoing') {
       const b = sim.ball
-      if (sim.ballRole === 'outgoing') {
-        drawBallTrail(ctx, sim)
-      }
-      let fill = '#333'
-      let stroke = 'rgba(0,0,0,0)'
+      drawBallTrail(ctx, sim)
+      let fill = '#ffffff'
+      let stroke = 'rgba(175, 205, 240, 0.52)'
       let lw = 2
-      if (sim.ballRole === 'incoming') {
-        fill = '#f2e6d8'
-        stroke = 'rgba(200, 120, 60, 0.75)'
-        lw = 2
-      } else if (
-        sim.ballRole === 'outgoing' &&
-        sim.ballExitBand === 'moonshot'
-      ) {
-        fill = '#3a2416'
+      if (sim.ballExitBand === 'moonshot') {
+        fill = '#fffefb'
         stroke = 'rgba(255, 235, 160, 0.98)'
-        lw = 3
-      } else if (
-        sim.ballRole === 'outgoing' &&
-        sim.ballExitBand === 'power'
-      ) {
-        fill = '#342818'
-        stroke = 'rgba(255, 200, 110, 0.9)'
-        lw = 2.5
+        lw = 3.2
+      } else if (sim.ballExitBand === 'power') {
+        fill = '#ffffff'
+        stroke = 'rgba(255, 200, 130, 0.9)'
+        lw = 2.85
       } else if (sim.ballShotTier === 'perfect_full_send') {
-        fill = '#3a2a22'
-        stroke = 'rgba(255, 120, 60, 0.85)'
-        lw = 2
+        fill = '#ffffff'
+        stroke = 'rgba(255, 110, 75, 0.9)'
+        lw = 2.45
       } else if (sim.ballShotTier === 'full_send') {
-        fill = '#2c2620'
-        stroke = 'rgba(255, 190, 90, 0.65)'
-        lw = 2
+        fill = '#ffffff'
+        stroke = 'rgba(255, 155, 85, 0.78)'
+        lw = 2.25
       }
-      const strokeOn =
-        sim.ballRole === 'incoming' ||
-        (sim.ballRole === 'outgoing' &&
-          (sim.ballExitBand === 'moonshot' ||
-            sim.ballExitBand === 'power' ||
-            sim.ballShotTier === 'full_send' ||
-            sim.ballShotTier === 'perfect_full_send'))
+      /** Rim always on so a bright white ball stays readable on sky / scoreboard. */
+      const strokeOn = true
+      const fullPower =
+        sim.ballShotTier === 'full_send' ||
+        sim.ballShotTier === 'perfect_full_send'
       const tipR = drawDynamicBall(
         ctx,
         b.x,
@@ -2895,33 +3005,36 @@ export function GameCanvas() {
         fill,
         stroke,
         lw,
-        strokeOn
+        strokeOn,
+        {
+          streakMul: 1.65,
+          smearThreshold: 22,
+          motionBlurSteps: 7,
+          stretchMul: 1.4,
+          speedLines: true,
+          redFlames: fullPower,
+          brightBall: true,
+        }
       )
-      if (sim.ballRole === 'outgoing' && sim.ballExitBand === 'moonshot') {
+      if (sim.ballExitBand === 'moonshot') {
         ctx.save()
         ctx.font = 'bold 11px system-ui, sans-serif'
         ctx.fillStyle = 'rgba(255, 230, 150, 0.98)'
         ctx.fillText('MOONSHOT', b.x - 34, b.y - tipR - 8)
         ctx.restore()
-      } else if (sim.ballRole === 'outgoing' && sim.ballExitBand === 'power') {
+      } else if (sim.ballExitBand === 'power') {
         ctx.save()
         ctx.font = 'bold 10px system-ui, sans-serif'
         ctx.fillStyle = 'rgba(255, 210, 130, 0.95)'
         ctx.fillText('POWER', b.x - 22, b.y - tipR - 7)
         ctx.restore()
-      } else if (
-        sim.ballRole === 'outgoing' &&
-        sim.ballShotTier === 'perfect_full_send'
-      ) {
+      } else if (sim.ballShotTier === 'perfect_full_send') {
         ctx.save()
         ctx.font = 'bold 10px system-ui, sans-serif'
         ctx.fillStyle = 'rgba(255, 160, 90, 0.95)'
         ctx.fillText('PERFECT SEND', b.x - 38, b.y - tipR - 6)
         ctx.restore()
-      } else if (
-        sim.ballRole === 'outgoing' &&
-        sim.ballShotTier === 'full_send'
-      ) {
+      } else if (sim.ballShotTier === 'full_send') {
         ctx.save()
         ctx.font = 'bold 10px system-ui, sans-serif'
         ctx.fillStyle = 'rgba(255, 210, 120, 0.9)'
@@ -2930,12 +3043,22 @@ export function GameCanvas() {
       }
     }
 
-    drawRetroScoreboard(ctx, w, h, {
-      score: sim.score,
-      timedMode: sim.timedMode,
-      timerRemainingSec: sim.timerRemainingSec,
-      comboMultiplier: sim.comboMultiplier,
-    })
+    drawRetroScoreboard(
+      ctx,
+      w,
+      h,
+      {
+        score: sim.score,
+        timedMode: sim.timedMode,
+        timerRemainingSec: sim.timerRemainingSec,
+        comboMultiplier: sim.comboMultiplier,
+      },
+      sim.sceneLayout.scale
+    )
+
+    if (dev.showSceneLayoutDebug) {
+      drawSceneLayoutDebug(ctx, sim)
+    }
 
     if (dev.showSpriteDebug && sim.spriteLayout) {
       drawSpriteDebugOverlay(ctx, sim.spriteLayout, sim.theta)
@@ -2951,35 +3074,24 @@ export function GameCanvas() {
       }
     }
 
-    if (devDrawOptionsRef.current.showLauncherDebugHud) {
-      if (
-        devDrawOptionsRef.current.enableSpinningDiscs &&
-        GALLERY_DEBUG_GUIDE_PRE_SHIFT_Y
-      ) {
-        const guideY = galleryFrontRowAnchorY(sim.h) - GALLERY_ROOT_OFFSET_Y_PX
-        ctx.save()
-        ctx.setLineDash([8, 6])
-        ctx.strokeStyle = 'rgba(255, 0, 160, 0.5)'
-        ctx.lineWidth = 1.25
-        ctx.beginPath()
-        ctx.moveTo(0, guideY)
-        ctx.lineTo(sim.w, guideY)
-        ctx.stroke()
-        ctx.setLineDash([])
-        ctx.font = '10px ui-monospace, monospace'
-        ctx.fillStyle = 'rgba(255, 0, 160, 0.85)'
-        ctx.fillText(
-          'pre-shift gallery anchor (GALLERY_FRONT_CY_FR × h)',
-          10,
-          Math.max(12, guideY - 6)
-        )
-        ctx.restore()
+    const hudPre = launcherHudPreRef.current
+    if (hudPre) {
+      if (devDrawOptionsRef.current.showLauncherDebugHud) {
+        hudPre.textContent = buildLauncherDebugHudLines(
+          sim,
+          devDrawOptionsRef.current.enableSpinningDiscs
+        ).join('\n')
+      } else {
+        hudPre.textContent = ''
       }
-      drawDebugOverlay(
-        ctx,
-        sim,
-        devDrawOptionsRef.current.enableSpinningDiscs
-      )
+    }
+
+    if (sim.phase === 'charging' && sim.pointer) {
+      canvas.style.cursor = 'grabbing'
+    } else if (sim.pointer && nearBat(sim)) {
+      canvas.style.cursor = 'grab'
+    } else {
+      canvas.style.cursor = ''
     }
   }, [])
 
@@ -2991,6 +3103,7 @@ export function GameCanvas() {
       showSpriteDebug,
       transparencyUnderlayTest,
       enableSpinningDiscs,
+      showSceneLayoutDebug,
     }
     const sim = simRef.current
     const canvas = canvasRef.current
@@ -3002,6 +3115,7 @@ export function GameCanvas() {
     showSpriteDebug,
     transparencyUnderlayTest,
     enableSpinningDiscs,
+    showSceneLayoutDebug,
     draw,
   ])
 
@@ -3010,6 +3124,7 @@ export function GameCanvas() {
     if (!sim) return
 
     sim.simTime += dt
+    updateFloatingCloudLayer(sim, dt)
 
     if (
       sim.timedMode &&
@@ -3050,14 +3165,7 @@ export function GameCanvas() {
       )
       sim.pCurrent = pullbackNormalizedFromVisualTheta(sim.theta)
       sim.omega = 0
-      sim.idleAutoPitchAccum = 0
       sim.pitchArmElapsed += dt
-      if (
-        sim.ball == null &&
-        sim.pitchArmElapsed >= PITCH_ARM_DELAY_SEC
-      ) {
-        spawnIncomingPitch(sim)
-      }
     } else if (sim.phase === 'swing') {
       sim.swingGrabLockoutRemain = Math.max(0, sim.swingGrabLockoutRemain - dt)
       sim.theta += sim.omega * dt
@@ -3111,29 +3219,21 @@ export function GameCanvas() {
       sim.pCurrent = 0
     }
 
-    const idleAutoOk =
-      sim.phase === 'idle' &&
-      sim.ball == null &&
-      sim.pointer == null
-    if (idleAutoOk) {
-      sim.idleAutoPitchAccum += dt
-      if (sim.idleAutoPitchAccum >= AUTO_PITCH_IDLE_SEC) {
-        spawnIncomingPitch(sim, { auto: true })
-      }
-    } else {
-      sim.idleAutoPitchAccum = 0
-    }
-
     const errPred = predictTimingErrorForPreview(sim)
+    const prevPrimary = primaryIncomingForGuidance(sim)
     if (
       errPred != null &&
+      prevPrimary != null &&
       ((sim.phase === 'charging' && sim.pointer) ||
         sim.phase === 'swing' ||
         sim.phase === 'recovery')
     ) {
       const pullbackU = sim.phase === 'charging' ? sim.pCurrent : sim.pRelease
-      const ixPrev = pitchPlannedContactPoint(sim)
-      const sweetPrev = sweetSpotQuFromT(sim.pitchContactFracT)
+      const ixPrev = pitchPlannedContactPoint(
+        sim,
+        prevPrimary.pitchContactFracT
+      )
+      const sweetPrev = sweetSpotQuFromT(prevPrimary.pitchContactFracT)
       sim.debugSweetQPreview = sweetPrev
       const outPrev = battedBallOutcome(
         sim,
@@ -3142,8 +3242,9 @@ export function GameCanvas() {
         ixPrev.y,
         pullbackU,
         sweetPrev,
-        sim.pitchContactFracT,
-        chargeThetaForAimPreview(sim)
+        prevPrimary.pitchContactFracT,
+        chargeThetaForAimPreview(sim),
+        prevPrimary.pitchSeq
       )
       sim.debugExitBandPreview = outPrev.exitBand
       sim.debugPredictedTimingErrorSec = errPred
@@ -3168,56 +3269,73 @@ export function GameCanvas() {
     sim.debugPreviewMatchesActual = false
     sim.debugPitchHud = computePitchHud(sim)
 
-    const b = sim.ball
-    if (b) {
-      if (sim.ballRole === 'incoming') {
-        updateIncomingBallDepthRadius(sim, b)
-        b.vy += sim.pitchIncomingAy * dt
-        b.x += b.vx * dt
-        b.y += b.vy * dt
-        sim.debugIncomingVel = { x: b.vx, y: b.vy }
-      } else {
-        sim.debugIncomingVel = null
-        integrateBall(
-          b,
-          OUTGOING_GRAVITY * sim.ballOutgoingGravityMul,
-          dt
-        )
-      }
+    for (const inc of sim.incomingPitches) {
+      const b = inc.ball
+      updateIncomingBallDepthRadiusFor(
+        sim,
+        sim.simTime,
+        inc.pitchSpawnSimTime,
+        inc.idealContactTime,
+        b
+      )
+      b.vy += inc.pitchIncomingAy * dt
+      b.x += b.vx * dt
+      b.y += b.vy * dt
+    }
 
-      if (sim.ballRole === 'incoming' && !sim.pitchContactResolved) {
-        const ix = pitchPlannedContactPoint(sim)
-        const thetaHit = sim.theta
-        const tipCur = batTip(sim.pivot, sim.batLen, thetaHit)
-        const d2 = distSqPointSegment(
-          b.x,
-          b.y,
-          sim.pivot.x,
-          sim.pivot.y,
-          tipCur.x,
-          tipCur.y
-        )
-        const tAlong = closestTOnBat(
-          b.x,
-          b.y,
-          sim.pivot,
-          sim.batLen,
-          thetaHit
-        )
-        const inUpperBarrel = tAlong >= CONTACT_BARREL_T_MIN
-        const inZone =
-          d2 <= CONTACT_ZONE_R * CONTACT_ZONE_R && inUpperBarrel
-        const inSwingArc =
-          thetaHit <= CONTACT_THETA_EARLY && thetaHit >= CONTACT_THETA_LATE
-        const pastPlate = b.x > ix.x + BALL_PAST_PLATE_DX && b.vx > 40
-        const swingOk =
-          (sim.phase === 'swing' || sim.phase === 'recovery') &&
-          sim.pRelease > POWER_DEADZONE &&
-          sim.idealContactTime > 0
+    for (const inc of sim.incomingPitches) {
+      const b = inc.ball
+      applyFloatingTargetHitsForBall(
+        sim,
+        b,
+        Math.max(ballRadiusPx(sim), b.r)
+      )
+    }
 
+    const primDbg = primaryIncomingForGuidance(sim)
+    sim.debugIncomingVel =
+      primDbg != null && !primDbg.pitchContactResolved
+        ? { x: primDbg.ball.vx, y: primDbg.ball.vy }
+        : null
+
+    for (let i = 0; i < sim.incomingPitches.length; i++) {
+      const inc = sim.incomingPitches[i]
+      const b = inc.ball
+      const ix = pitchPlannedContactPoint(sim, inc.pitchContactFracT)
+      const thetaHit = sim.theta
+      const tipCur = batTip(sim.pivot, sim.batLen, thetaHit)
+      const d2 = distSqPointSegment(
+        b.x,
+        b.y,
+        sim.pivot.x,
+        sim.pivot.y,
+        tipCur.x,
+        tipCur.y
+      )
+      const tAlong = closestTOnBat(
+        b.x,
+        b.y,
+        sim.pivot,
+        sim.batLen,
+        thetaHit
+      )
+      const inUpperBarrel = tAlong >= CONTACT_BARREL_T_MIN
+      const cz = contactZoneRadiusPx(sim)
+      const inZone = d2 <= cz * cz && inUpperBarrel
+      const inSwingArc =
+        thetaHit <= CONTACT_THETA_EARLY && thetaHit >= CONTACT_THETA_LATE
+      const pastPlate =
+        b.x > ix.x + designPx(sim.sceneLayout, BALL_PAST_PLATE_DX_DESIGN) &&
+        b.vx > 40
+      const swingOk =
+        (sim.phase === 'swing' || sim.phase === 'recovery') &&
+        sim.pRelease > POWER_DEADZONE &&
+        inc.idealContactTime > 0
+
+      if (!inc.pitchContactResolved) {
         if (inZone && swingOk && inSwingArc) {
-          sim.pitchContactResolved = true
-          const err = sim.simTime - sim.idealContactTime
+          inc.pitchContactResolved = true
+          const err = sim.simTime - inc.idealContactTime
           sim.debugTimingErrorSec = err
           sim.debugSwingCrossTime = sim.batCrossLaunchTime ?? sim.simTime
 
@@ -3233,7 +3351,8 @@ export function GameCanvas() {
             sim.pRelease,
             sweetHit,
             tAlong,
-            sim.thetaRelease
+            sim.thetaRelease,
+            inc.pitchSeq
           )
           sim.debugTransferEff = out.transferEff
           sim.debugContactBucket = out.bucket
@@ -3245,7 +3364,8 @@ export function GameCanvas() {
           if (out.bucket !== 'miss') {
             b.vx = out.vx
             b.vy = out.vy
-            b.r = BALL_R
+            b.r = ballRadiusPx(sim)
+            sim.ball = b
             sim.ballRole = 'outgoing'
             sim.ballShotTier = out.tier
             sim.ballPierceArmed = out.tier === 'perfect_full_send'
@@ -3266,6 +3386,19 @@ export function GameCanvas() {
             } else {
               sim.debugContactFlash = 0.12
             }
+            if (
+              out.tier === 'full_send' ||
+              out.tier === 'perfect_full_send'
+            ) {
+              sim.releaseFlashTier = out.tier
+              sim.releaseFlashRemain =
+                out.tier === 'perfect_full_send'
+                  ? FLASH_PERFECT_SEND
+                  : FLASH_FULL_SEND
+              if (out.tier === 'perfect_full_send') {
+                sim.shakeRemain = Math.max(sim.shakeRemain, SHAKE_PERFECT)
+              }
+            }
             sim.debugOutgoingVel = { x: out.vx, y: out.vy }
             sim.debugVerticalBandAtContact = out.verticalBand ?? '—'
             sim.debugOutcomeClassAtContact = out.outcomeClass ?? '—'
@@ -3276,58 +3409,64 @@ export function GameCanvas() {
               predE != null &&
               Math.abs(predE - err) < 0.04 &&
               Math.hypot(cmp.x - out.vx, cmp.y - out.vy) < 55
+            sim.incomingPitches.splice(i, 1)
+            i--
+            sim.skipOutgoingPhysicsOnce = true
           } else {
             sim.debugContactFlash = 0.06
             sim.debugOutgoingVel = null
             sim.debugVerticalBandAtContact = '—'
             sim.debugOutcomeClassAtContact = '—'
           }
-        } else if (pastPlate) {
-          sim.pitchContactResolved = true
-          sim.debugContactBucket = 'miss'
-          sim.debugTimingErrorSec = null
-          sim.ball = null
-          sim.ballTrail = []
-          sim.ballRole = 'none'
-          sim.idealContactTime = -1
+          break
         }
       }
 
-      if (sim.ballRole === 'outgoing') {
-        sim.ballTrail.unshift({ x: b.x, y: b.y })
-        if (sim.ballTrail.length > TRAIL_MAX) {
-          sim.ballTrail.length = TRAIL_MAX
-        }
+      if (pastPlate) {
+        sim.incomingPitches.splice(i, 1)
+        i--
+      }
+    }
+
+    for (let i = sim.incomingPitches.length - 1; i >= 0; i--) {
+      const inc = sim.incomingPitches[i]
+      const b = inc.ball
+      const br = Math.max(ballRadiusPx(sim), b.r)
+      const oob =
+        b.x < -br * 2 ||
+        b.x > sim.w + br * 2 ||
+        b.y < -br * 2 ||
+        b.y > sim.h + br * 2
+      if (oob) {
+        sim.incomingPitches.splice(i, 1)
+      }
+    }
+
+    const bOut = sim.ball
+    if (bOut && sim.ballRole === 'outgoing') {
+      if (sim.skipOutgoingPhysicsOnce) {
+        sim.skipOutgoingPhysicsOnce = false
+      } else {
+        integrateBall(
+          bOut,
+          OUTGOING_GRAVITY * sim.ballOutgoingGravityMul,
+          dt
+        )
+      }
+      sim.ballTrail.unshift({ x: bOut.x, y: bOut.y })
+      if (sim.ballTrail.length > TRAIL_MAX) {
+        sim.ballTrail.length = TRAIL_MAX
       }
 
-      if (sim.ballRole === 'incoming') {
-        const br = Math.max(BALL_R, b.r)
-        const oob =
-          b.x < -br * 2 ||
-          b.x > sim.w + br * 2 ||
-          b.y < -br * 2 ||
-          b.y > sim.h + br * 2
-        if (oob) {
-          sim.ball = null
-          sim.ballTrail = []
-          sim.ballRole = 'none'
-          sim.idealContactTime = -1
-        }
-      }
+      applyFloatingTargetHitsForBall(sim, bOut, ballRadiusPx(sim))
 
       let hitRing = -1
       let hitIdx = -1
-      if (sim.ballRole === 'outgoing') {
-        if (devDrawOptionsRef.current.enableSpinningDiscs) {
-          const resolved = resolveSingleTargetHit(sim, b, dt)
-          if (resolved != null) {
-            hitRing = resolved.ring
-            hitIdx = resolved.idx
-          }
-        } else {
-          sim.debugHitCandidateCount = 0
-          sim.debugHitWinnerLine = ''
-          sim.debugHitCandidateLines = []
+      if (devDrawOptionsRef.current.enableSpinningDiscs) {
+        const resolved = resolveSingleTargetHit(sim, bOut, dt)
+        if (resolved != null) {
+          hitRing = resolved.ring
+          hitIdx = resolved.idx
         }
       } else {
         sim.debugHitCandidateCount = 0
@@ -3346,43 +3485,50 @@ export function GameCanvas() {
         if (tier === 'perfect_full_send' && sim.ballPierceArmed) {
           sim.ballPierceArmed = false
           sim.ballNextHitMinRing = Math.min(hitRing + 1, RING_COUNT)
-          b.vx *= PIERCE_SPEED_MUL
-          b.vy *= PIERCE_SPEED_MUL
+          bOut.vx *= PIERCE_SPEED_MUL
+          bOut.vy *= PIERCE_SPEED_MUL
           console.log('hit (pierce — perfect full send)')
         } else if (tier === 'full_send') {
           chainDestroyNeighbors(sim, hitRing, hitIdx)
           sim.ball = null
           sim.ballTrail = []
           sim.ballRole = 'none'
-          sim.idealContactTime = -1
           console.log('hit (full send + chain)')
         } else {
           sim.ball = null
           sim.ballTrail = []
           sim.ballRole = 'none'
-          sim.idealContactTime = -1
           console.log('hit')
         }
         refreshTargetActiveFlags(sim)
       } else if (
-        sim.ballRole === 'outgoing' &&
-        (b.x < -BALL_R * 2 ||
-          b.x > sim.w + BALL_R * 2 ||
-          b.y < -BALL_R * 2 ||
-          b.y > sim.h + BALL_R * 2)
+        bOut.x < -ballRadiusPx(sim) * 2 ||
+        bOut.x > sim.w + ballRadiusPx(sim) * 2 ||
+        bOut.y < -ballRadiusPx(sim) * 2 ||
+        bOut.y > sim.h + ballRadiusPx(sim) * 2
       ) {
         sim.ball = null
         sim.ballTrail = []
         sim.ballRole = 'none'
-        sim.idealContactTime = -1
       }
+    } else {
+      sim.debugHitCandidateCount = 0
+      sim.debugHitWinnerLine = ''
+      sim.debugHitCandidateLines = []
     }
 
     if (sim.ball == null) {
       sim.ballOutgoingGravityMul = 1
       sim.ballExitBand = 'standard'
       sim.ballNextHitMinRing = null
-      sim.pitchSpawnSimTime = -1
+    }
+
+    sim.pitchNextIn -= dt
+    if (sim.pitchNextIn <= 0) {
+      if (sim.incomingPitches.length < MAX_INCOMING_PITCHES) {
+        trySpawnIncomingPitch(sim)
+      }
+      sim.pitchNextIn += nextPitchCadenceInterval(sim)
     }
 
     draw()
@@ -3459,19 +3605,9 @@ export function GameCanvas() {
       sim.powerTierRelease = 'normal'
       sim.releaseFlashTier = null
       sim.releaseFlashRemain = 0
-      clearIncomingPitch(sim)
       sim.pitchArmElapsed = 0
     } else {
       sim.powerTierRelease = classifyPowerTier(sim.pRelease)
-      const tr = sim.powerTierRelease
-      if (tr === 'full_send' || tr === 'perfect_full_send') {
-        sim.releaseFlashTier = tr
-        sim.releaseFlashRemain =
-          tr === 'perfect_full_send' ? FLASH_PERFECT_SEND : FLASH_FULL_SEND
-      }
-      if (tr === 'perfect_full_send') {
-        sim.shakeRemain = SHAKE_PERFECT
-      }
       sim.phase = 'swing'
       sim.springSwingT0 = sim.simTime
       sim.theta = sim.thetaRelease
@@ -3511,203 +3647,230 @@ export function GameCanvas() {
       sim.powerTierRelease = 'normal'
       sim.releaseFlashTier = null
       sim.releaseFlashRemain = 0
-      clearIncomingPitch(sim)
       sim.pitchArmElapsed = 0
     }
     sim.pointer = null
+    const c = canvasRef.current
+    if (c) c.style.cursor = ''
     draw()
   }
 
-  return (
+  const devToolsPanel = (
     <div
-      ref={containerRef}
+      className="game-dev-tools"
       style={{
-        width: '100%',
-        height: '100%',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        position: 'relative',
+        fontFamily: 'ui-monospace, monospace',
+        fontSize: 9,
+        lineHeight: 1.25,
+        color: '#c8d0d8',
+        userSelect: 'none',
       }}
     >
-      <canvas
-        ref={canvasRef}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
-        onPointerLeave={onPointerLeave}
-        style={{ touchAction: 'none', display: 'block' }}
-      />
-      <div
+      <button
+        type="button"
+        onClick={() => setDevToolsOpen((o) => !o)}
         style={{
-          position: 'absolute',
-          left: 8,
-          bottom: 8,
-          zIndex: 10,
-          fontFamily: 'ui-monospace, monospace',
-          fontSize: 11,
-          color: '#e8e8e8',
-          userSelect: 'none',
+          cursor: 'pointer',
+          padding: '3px 8px',
+          borderRadius: 4,
+          border: '1px solid rgba(196,206,212,0.28)',
+          background: 'rgba(12,44,86,0.92)',
+          color: '#e8eef2',
+          font: 'inherit',
+          fontSize: 9,
         }}
       >
-        <button
-          type="button"
-          onClick={() => setDevToolsOpen((o) => !o)}
+        {devToolsOpen ? '▼ Dev' : '▶ Dev'}
+      </button>
+      <pre
+        ref={launcherHudPreRef}
+        className="game-launcher-hud-pre"
+        style={{
+          display: showLauncherDebugHud ? 'block' : 'none',
+          marginTop: 6,
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+        }}
+      />
+      {devToolsOpen && (
+        <div
           style={{
-            cursor: 'pointer',
-            padding: '4px 10px',
+            marginTop: 5,
+            padding: '6px 8px',
             borderRadius: 6,
-            border: '1px solid rgba(255,255,255,0.25)',
-            background: 'rgba(20,22,28,0.92)',
-            color: '#eee',
-            font: 'inherit',
+            border: '1px solid rgba(196,206,212,0.2)',
+            background: 'rgba(8,14,24,0.96)',
+            maxWidth: 280,
+            boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
           }}
         >
-          {devToolsOpen ? '▼ Dev tools' : '▶ Dev tools'}
-        </button>
-        {devToolsOpen && (
           <div
             style={{
-              marginTop: 6,
-              padding: '10px 12px',
-              borderRadius: 8,
-              border: '1px solid rgba(255,255,255,0.2)',
-              background: 'rgba(18,20,26,0.95)',
-              maxWidth: 280,
-              boxShadow: '0 6px 24px rgba(0,0,0,0.45)',
+              fontWeight: 600,
+              marginBottom: 5,
+              opacity: 0.92,
+              fontSize: 9,
             }}
           >
-            <div
-              style={{
-                fontWeight: 600,
-                marginBottom: 8,
-                opacity: 0.95,
-              }}
-            >
-              Visibility
-            </div>
-            <label
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                marginBottom: 6,
-                cursor: 'pointer',
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={enableSpinningDiscs}
-                onChange={(e) => setEnableSpinningDiscs(e.target.checked)}
-              />
-              Enable spinning discs
-            </label>
-            <div
-              style={{
-                fontSize: 10,
-                opacity: 0.65,
-                margin: '-2px 0 10px 22px',
-                lineHeight: 1.35,
-              }}
-            >
-              Off: no disc draw, collisions, scoring, or disc target / occluder
-              logic. Canvas shows “Disc field disabled”. Other gameplay continues.
-            </div>
-            <label
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                marginBottom: 6,
-                cursor: 'pointer',
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={clipDiscLowerHalf}
-                onChange={(e) => setClipDiscLowerHalf(e.target.checked)}
-              />
-              Clip wheel to exposed region (fixed machine lip)
-            </label>
-            <label
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                marginBottom: 6,
-                cursor: 'pointer',
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={revealHiddenLayers}
-                onChange={(e) => setRevealHiddenLayers(e.target.checked)}
-              />
-              Reveal hidden / debug layers
-            </label>
-            <div
-              style={{
-                fontSize: 10,
-                opacity: 0.65,
-                margin: '-2px 0 10px 22px',
-                lineHeight: 1.35,
-              }}
-            >
-              When on: full disc, fixed occluder line (does not rotate), peg
-              LIVE/hit/off labels. Overrides clipping so you can see behind the
-              lip.
-            </div>
-            <label
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                cursor: 'pointer',
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={showLauncherDebugHud}
-                onChange={(e) => setShowLauncherDebugHud(e.target.checked)}
-              />
-              Show launcher debug HUD
-            </label>
-            <label
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                marginTop: 6,
-                cursor: 'pointer',
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={showSpriteDebug}
-                onChange={(e) => setShowSpriteDebug(e.target.checked)}
-              />
-              Sprite pivot / bat bbox / θ (console throttled)
-            </label>
-            <label
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                marginTop: 6,
-                cursor: 'pointer',
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={transparencyUnderlayTest}
-                onChange={(e) => setTransparencyUnderlayTest(e.target.checked)}
-              />
-              Transparency test (red underlay before bg)
-            </label>
+            Visibility
           </div>
-        )}
-      </div>
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              marginBottom: 4,
+              cursor: 'pointer',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={enableSpinningDiscs}
+              onChange={(e) => setEnableSpinningDiscs(e.target.checked)}
+            />
+            Spinning discs
+          </label>
+          <div
+            style={{
+              fontSize: 8,
+              opacity: 0.62,
+              margin: '-1px 0 6px 18px',
+              lineHeight: 1.3,
+            }}
+          >
+            Off: no disc draw / hits / score. Other play continues.
+          </div>
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              marginBottom: 4,
+              cursor: 'pointer',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={clipDiscLowerHalf}
+              onChange={(e) => setClipDiscLowerHalf(e.target.checked)}
+            />
+            Clip wheel (lip)
+          </label>
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              marginBottom: 4,
+              cursor: 'pointer',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={revealHiddenLayers}
+              onChange={(e) => setRevealHiddenLayers(e.target.checked)}
+            />
+            Reveal hidden layers
+          </label>
+          <div
+            style={{
+              fontSize: 8,
+              opacity: 0.62,
+              margin: '-1px 0 6px 18px',
+              lineHeight: 1.3,
+            }}
+          >
+            Full disc + occluder line + peg labels.
+          </div>
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              cursor: 'pointer',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={showLauncherDebugHud}
+              onChange={(e) => setShowLauncherDebugHud(e.target.checked)}
+            />
+            Launcher telemetry (off-canvas)
+          </label>
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              marginTop: 4,
+              cursor: 'pointer',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={showSpriteDebug}
+              onChange={(e) => setShowSpriteDebug(e.target.checked)}
+            />
+            Sprite debug (θ / bbox)
+          </label>
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              marginTop: 4,
+              cursor: 'pointer',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={showSceneLayoutDebug}
+              onChange={(e) => setShowSceneLayoutDebug(e.target.checked)}
+            />
+            Scene layout debug (scale / anchors)
+          </label>
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              marginTop: 4,
+              cursor: 'pointer',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={transparencyUnderlayTest}
+              onChange={(e) => setTransparencyUnderlayTest(e.target.checked)}
+            />
+            Transparency test
+          </label>
+        </div>
+      )}
     </div>
+  )
+
+  return (
+    <>
+      <div
+        ref={containerRef}
+        style={{
+          display: 'block',
+          position: 'relative',
+          flexShrink: 0,
+        }}
+      >
+        <canvas
+          ref={canvasRef}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+          onPointerLeave={onPointerLeave}
+        style={{ touchAction: 'none', display: 'block' }}
+      />
+      </div>
+      {devToolsHostEl ? createPortal(devToolsPanel, devToolsHostEl) : null}
+    </>
   )
 }

@@ -9,7 +9,8 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "assets:webp-bg": "node scripts/encode-bg-stadium-webp.mjs"
+    "assets:webp-bg": "node scripts/encode-bg-stadium-webp.mjs",
+    "assets:webp-sprites": "node scripts/convert-png-assets-to-webp.mjs"
   },
   "dependencies": {
     "react": "^19.2.4",
