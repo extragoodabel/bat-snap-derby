@@ -148,6 +148,13 @@ const POWER_STRONG = 0.75
 const POWER_FULL_SEND = 0.9
 const POWER_PERFECT_SEND = 0.97
 
+/** Gap between top of bat swing circle and power bar (logical px). */
+const POWER_BAR_GAP_ABOVE_SWING_PX = 12
+/** Space reserved above bar for tier hint labels. */
+const POWER_BAR_LABEL_CLEARANCE_PX = 20
+/** Ideal swing-zone arc: inner “sweet” band as fraction of contact angular span. */
+const IDEAL_ZONE_CORE_FR = 0.34
+
 const CHAIN_ANGLE_RAD = 0.42
 const PIERCE_SPEED_MUL = 0.62
 const TRAIL_MAX = 22
@@ -167,8 +174,19 @@ const PITCH_INCOMING_AY_MAX = 120
 /** Wide strike-height variety on the bat (t pivot→tip); bias upward in pickPitchVariantParams. */
 const PITCH_CONTACT_FR_MIN = 0.48
 const PITCH_CONTACT_FR_MAX = 0.97
-/** Release point horizontal (fraction of w); left of plate for mostly +x travel. */
-const PITCH_MOUND_X_FR = 0.31
+/** Pitch origin: horizontal center of scene (mound). */
+const PITCH_MOUND_X_FR = 0.5
+/**
+ * Pitch origin Y (fraction of h, top→down): center of lower 1/8 of screen
+ * (band [7/8, 1] → midpoint 15/16).
+ */
+const PITCH_MOUND_Y_FR = 15 / 16
+/** Logical px: move release point up (smaller Y) toward visible mound art. */
+const PITCH_MOUND_NUDGE_UP_PX = 100
+/**
+ * Incoming ball radius multiplier at release (grows to 1.0 by ideal contact time).
+ */
+const PITCH_DEPTH_START_R_MUL = 0.32
 /**
  * Incoming pitch aims along the launch bat but caps distance from pivot so the
  * target stays over the infield. Uncapped length from oversized sprite bats
@@ -460,6 +478,8 @@ type Sim = {
   /** Incoming-only vertical acceleration (shallow arc). */
   pitchIncomingAy: number
   pitchReleaseDyPx: number
+  /** `simTime` when current pitch left the mound; -1 if no incoming pitch. */
+  pitchSpawnSimTime: number
   /** Seconds spent idle with no ball; triggers auto pitch. */
   idleAutoPitchAccum: number
 
@@ -909,6 +929,7 @@ function createSim(w: number, h: number): Sim {
     pitchSpeedNominal: (PITCH_SPEED_MIN + PITCH_SPEED_MAX) / 2,
     pitchIncomingAy: (PITCH_INCOMING_AY_MIN + PITCH_INCOMING_AY_MAX) / 2,
     pitchReleaseDyPx: 0,
+    pitchSpawnSimTime: -1,
     idleAutoPitchAccum: 0,
     debugLaunchDir: { x: -0.92, y: -0.38 },
     debugPitchHud: 'idle',
@@ -1118,6 +1139,32 @@ function pickPitchVariantParams(sim: Sim): void {
   sim.pitchIncomingAy = ayRaw * 0.45 + PITCH_INCOMING_AY_MIN * 0.55
   sim.pitchReleaseDyPx =
     (a3 - 0.5) * 1.45 * PITCH_RELEASE_DY_FR * m + PITCH_RELEASE_DY_BIAS_FR * m
+}
+
+/** World position where the pitch spawns (mound); matches `spawnIncomingPitch`. */
+function pitchMoundScreenPoint(sim: Sim): Vec2 {
+  return {
+    x: sim.w * PITCH_MOUND_X_FR,
+    y:
+      sim.h * PITCH_MOUND_Y_FR +
+      sim.pitchReleaseDyPx * 0.35 -
+      PITCH_MOUND_NUDGE_UP_PX,
+  }
+}
+
+/** Depth cue: radius ramps from small (“far”) to full size near the plate. */
+function updateIncomingBallDepthRadius(sim: Sim, b: Ball): void {
+  const t0 = sim.pitchSpawnSimTime
+  const t1 = sim.idealContactTime
+  if (t0 < 0 || t1 <= t0) {
+    b.r = BALL_R
+    return
+  }
+  const u = clamp((sim.simTime - t0) / (t1 - t0), 0, 1)
+  const smooth = u * u * (3 - 2 * u)
+  const mul =
+    PITCH_DEPTH_START_R_MUL + (1 - PITCH_DEPTH_START_R_MUL) * smooth
+  b.r = BALL_R * mul
 }
 
 function combinedTransfer(
@@ -1596,8 +1643,9 @@ function drawHittingGuidance(ctx: CanvasRenderingContext2D, sim: Sim): void {
   const ix = pitchPlannedContactPoint(sim)
   const p = sim.pivot
   const L = sim.batLen
-  const moundX = sim.w * PITCH_MOUND_X_FR
-  const moundY = ix.y + sim.pitchReleaseDyPx
+  const mound = pitchMoundScreenPoint(sim)
+  const moundX = mound.x
+  const moundY = mound.y
 
   ctx.save()
 
@@ -1689,26 +1737,70 @@ function drawHittingGuidance(ctx: CanvasRenderingContext2D, sim: Sim): void {
   ctx.restore()
 }
 
-/** Legal aim arc while charging (direction / angle range). */
-function drawChargeWindowArcWhite(
-  ctx: CanvasRenderingContext2D,
-  sim: Sim
-): void {
+/**
+ * Soft “energy window” on the bat swing arc: valid contact θ range (warm glow, feathered).
+ * Only while charging + pointer; intensity follows pullback + faint readiness pulse.
+ */
+function drawIdealSwingZoneArc(ctx: CanvasRenderingContext2D, sim: Sim): void {
+  if (sim.phase !== 'charging' || !sim.pointer) return
+
   const { pivot: p, batLen: L } = sim
-  const steps = 40
-  ctx.save()
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.92)'
-  ctx.lineWidth = 3
-  ctx.beginPath()
-  for (let i = 0; i <= steps; i++) {
-    const u = i / steps
-    const a = THETA_CHARGE_MIN + u * (THETA_CHARGE_MAX - THETA_CHARGE_MIN)
-    const x = p.x + L * Math.cos(a)
-    const y = p.y + L * Math.sin(a)
-    if (i === 0) ctx.moveTo(x, y)
-    else ctx.lineTo(x, y)
+  const theta0 = CONTACT_THETA_LATE
+  const theta1 = CONTACT_THETA_EARLY
+  const steps = 56
+
+  const pull = clamp(
+    (sim.pCurrent - POWER_DEADZONE) / Math.max(1e-6, 1 - POWER_DEADZONE),
+    0,
+    1
+  )
+  const pulse = 1 + 0.055 * Math.sin(sim.simTime * 2.75)
+  const baseA = (0.22 + 0.78 * pull) * pulse
+
+  const arcPolyline = (tA: number, tB: number, n: number) => {
+    ctx.beginPath()
+    for (let i = 0; i <= n; i++) {
+      const u = i / n
+      const a = tA + u * (tB - tA)
+      const x = p.x + L * Math.cos(a)
+      const y = p.y + L * Math.sin(a)
+      if (i === 0) ctx.moveTo(x, y)
+      else ctx.lineTo(x, y)
+    }
   }
+
+  ctx.save()
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+  ctx.globalCompositeOperation = 'lighter'
+
+  const layers: { w: number; a: number }[] = [
+    { w: 28, a: 0.07 * baseA },
+    { w: 19, a: 0.1 * baseA },
+    { w: 12, a: 0.14 * baseA },
+    { w: 6.5, a: 0.2 * baseA },
+    { w: 3.2, a: 0.28 * baseA },
+  ]
+  for (const { w, a } of layers) {
+    arcPolyline(theta0, theta1, steps)
+    ctx.strokeStyle = `rgba(255, 220, 185, ${Math.min(1, a)})`
+    ctx.lineWidth = w
+    ctx.stroke()
+  }
+
+  const mid = (theta0 + theta1) * 0.5
+  const half = (theta1 - theta0) * IDEAL_ZONE_CORE_FR * 0.5
+  const c0 = mid - half
+  const c1 = mid + half
+  arcPolyline(c0, c1, Math.ceil(steps * IDEAL_ZONE_CORE_FR) + 4)
+  ctx.strokeStyle = `rgba(255, 245, 220, ${0.22 * baseA})`
+  ctx.lineWidth = 4
   ctx.stroke()
+  arcPolyline(c0, c1, Math.ceil(steps * IDEAL_ZONE_CORE_FR) + 4)
+  ctx.strokeStyle = `rgba(195, 235, 210, ${0.14 * baseA})`
+  ctx.lineWidth = 1.6
+  ctx.stroke()
+
   ctx.restore()
 }
 
@@ -1913,56 +2005,95 @@ function drawPowerBar(
     perfectSendZoneLive?: boolean
   }
 ): void {
-  const barW = sim.batLen * 2.1
-  const barH = 14
-  const bx = sim.pivot.x - barW / 2
-  const by = sim.pivot.y + sim.batLen * 0.42
+  const { pivot: p, batLen: L } = sim
+  const barW = clamp(L * 1.75, 112, sim.w * 0.44)
+  const barH = 13
+  const arcTopY = p.y - L
+  let by =
+    arcTopY -
+    POWER_BAR_GAP_ABOVE_SWING_PX -
+    barH -
+    POWER_BAR_LABEL_CLEARANCE_PX
+  by = clamp(by, 10, sim.h - barH - 14)
+  const bx = clamp(p.x - barW / 2, 8, sim.w - barW - 8)
 
-  ctx.fillStyle = '#2a2a2a'
-  ctx.strokeStyle = '#111'
-  ctx.lineWidth = 2
+  const phaseDim =
+    sim.phase === 'recovery' ? 0.55 : sim.phase === 'swing' ? 0.88 : 1
+
+  ctx.save()
+  ctx.globalAlpha = phaseDim
+
+  ctx.fillStyle = 'rgba(14, 24, 28, 0.48)'
+  ctx.strokeStyle = 'rgba(95, 175, 160, 0.42)'
+  ctx.lineWidth = 1.5
   ctx.beginPath()
-  ctx.rect(bx, by, barW, barH)
+  ctx.roundRect(bx, by, barW, barH, 5)
   ctx.fill()
   ctx.stroke()
 
   if (opts?.perfectSendLocked || opts?.perfectSendZoneLive) {
-    ctx.strokeStyle = 'rgba(255, 120, 60, 0.98)'
-    ctx.lineWidth = opts?.perfectSendLocked ? 5 : 3
-    ctx.strokeRect(bx - 4, by - 4, barW + 8, barH + 8)
+    ctx.strokeStyle = 'rgba(255, 140, 90, 0.52)'
+    ctx.lineWidth = opts?.perfectSendLocked ? 3 : 2
+    ctx.strokeRect(bx - 2, by - 2, barW + 4, barH + 4)
   } else if (opts?.fullSendLocked || opts?.fullSendZoneLive) {
-    ctx.strokeStyle = 'rgba(255, 215, 80, 0.92)'
-    ctx.lineWidth = opts?.fullSendLocked ? 4 : 2
-    ctx.strokeRect(bx - 3, by - 3, barW + 6, barH + 6)
+    ctx.strokeStyle = 'rgba(255, 215, 150, 0.48)'
+    ctx.lineWidth = opts?.fullSendLocked ? 2.5 : 1.75
+    ctx.strokeRect(bx - 2, by - 2, barW + 4, barH + 4)
   }
 
   const fp = clamp(fillP, 0, 1)
   if (fp > 0) {
-    ctx.fillStyle = powerBarColor(fp)
-    ctx.fillRect(bx + 3, by + 3, (barW - 6) * fp, barH - 6)
+    const innerPad = 3.5
+    const iw = barW - innerPad * 2
+    const ih = barH - innerPad * 2
+    const g = ctx.createLinearGradient(bx, by, bx + iw, by)
+    g.addColorStop(0, powerBarColor(fp))
+    g.addColorStop(1, powerBarColor(fp * 0.92))
+    ctx.globalAlpha = phaseDim * 0.68
+    ctx.fillStyle = g
+    ctx.beginPath()
+    ctx.roundRect(
+      bx + innerPad,
+      by + innerPad,
+      iw * fp,
+      ih,
+      Math.min(4, ih * 0.45)
+    )
+    ctx.fill()
+    ctx.globalAlpha = phaseDim
   }
 
-  ctx.fillStyle = '#fff'
-  ctx.font = 'bold 11px ui-monospace, monospace'
-  ctx.fillText(`${label} ${fp.toFixed(2)}`, bx + barW + 8, by + barH - 2)
+  ctx.fillStyle = 'rgba(225, 248, 238, 0.88)'
+  ctx.font =
+    '600 10px "Oswald", "Arial Narrow", system-ui, sans-serif'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(`${label} ${fp.toFixed(2)}`, bx + barW / 2, by + barH / 2, barW - 10)
+  ctx.textAlign = 'left'
 
   if (opts?.perfectSendLocked) {
-    ctx.fillStyle = 'rgba(255, 140, 80, 0.98)'
-    ctx.font = 'bold 12px system-ui, sans-serif'
-    ctx.fillText('PERFECT FULL SEND', bx, by - 8)
+    ctx.fillStyle = 'rgba(255, 195, 155, 0.9)'
+    ctx.font = '600 10px "Oswald", system-ui, sans-serif'
+    ctx.textBaseline = 'bottom'
+    ctx.fillText('PERFECT FULL SEND', bx, by - 3)
   } else if (opts?.fullSendLocked) {
-    ctx.fillStyle = 'rgba(255, 230, 120, 0.95)'
-    ctx.font = 'bold 12px system-ui, sans-serif'
-    ctx.fillText('FULL SEND', bx, by - 8)
+    ctx.fillStyle = 'rgba(255, 230, 190, 0.88)'
+    ctx.font = '600 10px "Oswald", system-ui, sans-serif'
+    ctx.textBaseline = 'bottom'
+    ctx.fillText('FULL SEND', bx, by - 3)
   } else if (opts?.perfectSendZoneLive) {
-    ctx.fillStyle = 'rgba(255, 160, 90, 0.95)'
-    ctx.font = 'bold 11px system-ui, sans-serif'
-    ctx.fillText('perfect send zone', bx, by - 6)
+    ctx.fillStyle = 'rgba(255, 200, 160, 0.82)'
+    ctx.font = '600 9px "Oswald", system-ui, sans-serif'
+    ctx.textBaseline = 'bottom'
+    ctx.fillText('perfect send', bx, by - 2)
   } else if (opts?.fullSendZoneLive) {
-    ctx.fillStyle = 'rgba(255, 220, 100, 0.9)'
-    ctx.font = 'bold 11px system-ui, sans-serif'
-    ctx.fillText('full send zone', bx, by - 6)
+    ctx.fillStyle = 'rgba(255, 225, 185, 0.78)'
+    ctx.font = '600 9px "Oswald", system-ui, sans-serif'
+    ctx.textBaseline = 'bottom'
+    ctx.fillText('full send', bx, by - 2)
   }
+
+  ctx.restore()
 }
 
 function drawReleaseFlash(ctx: CanvasRenderingContext2D, sim: Sim): void {
@@ -2143,7 +2274,13 @@ function drawDebugOverlay(
 
   ctx.save()
   strokeArc(THETA_LEFT, THETA_RIGHT, 'rgba(100,100,100,0.35)', 2)
-  strokeArc(THETA_CHARGE_MIN, THETA_CHARGE_MAX, 'rgba(0, 220, 120, 0.9)', 5)
+  strokeArc(THETA_CHARGE_MIN, THETA_CHARGE_MAX, 'rgba(130, 205, 175, 0.55)', 4)
+  strokeArc(
+    CONTACT_THETA_LATE,
+    CONTACT_THETA_EARLY,
+    'rgba(255, 210, 175, 0.4)',
+    7
+  )
 
   ctx.fillStyle = '#0af'
   ctx.beginPath()
@@ -2155,7 +2292,7 @@ function drawDebugOverlay(
   ctx.arc(tip.x, tip.y, 5, 0, Math.PI * 2)
   ctx.fill()
 
-  ctx.strokeStyle = 'rgba(0, 255, 200, 0.45)'
+  ctx.strokeStyle = 'rgba(160, 220, 195, 0.42)'
   ctx.lineWidth = 1.5
   ctx.setLineDash([4, 4])
   ctx.beginPath()
@@ -2184,7 +2321,7 @@ function drawDebugOverlay(
   ctx.fill()
 
   const arrowLen = L * 0.5
-  ctx.strokeStyle = '#0f0'
+  ctx.strokeStyle = 'rgba(185, 235, 205, 0.85)'
   ctx.lineWidth = 2
   ctx.beginPath()
   ctx.moveTo(ix.x, ix.y)
@@ -2215,7 +2352,7 @@ function drawDebugOverlay(
     ctx.stroke()
     if (sim.ballRole === 'outgoing' && bv > 35) {
       const rayLen = Math.min(240, 38 + bv * 0.22)
-      ctx.strokeStyle = 'rgba(120, 255, 160, 0.42)'
+      ctx.strokeStyle = 'rgba(165, 228, 195, 0.45)'
       ctx.lineWidth = 1.25
       ctx.setLineDash([5, 6])
       ctx.beginPath()
@@ -2360,10 +2497,7 @@ function spawnIncomingPitch(sim: Sim, opts?: { auto?: boolean }): void {
   sim.debugAutoPitch = opts?.auto ?? false
 
   const target = pitchPlannedContactPoint(sim)
-  const start = {
-    x: sim.w * PITCH_MOUND_X_FR,
-    y: target.y + sim.pitchReleaseDyPx,
-  }
+  const start = pitchMoundScreenPoint(sim)
   const dx = target.x - start.x
   const dy = target.y - start.y
   const len = Math.hypot(dx, dy) || 1
@@ -2375,9 +2509,10 @@ function spawnIncomingPitch(sim: Sim, opts?: { auto?: boolean }): void {
     y: start.y,
     vx,
     vy,
-    r: BALL_R,
+    r: BALL_R * PITCH_DEPTH_START_R_MUL,
   }
   sim.ballRole = 'incoming'
+  sim.pitchSpawnSimTime = sim.simTime
   sim.ballShotTier = 'normal'
   sim.ballPierceArmed = false
   sim.ballNextHitMinRing = null
@@ -2401,6 +2536,7 @@ function clearIncomingPitch(sim: Sim): void {
   sim.ballTrail = []
   sim.ballRole = 'none'
   sim.idealContactTime = -1
+  sim.pitchSpawnSimTime = -1
   sim.pitchContactResolved = false
 }
 
@@ -2624,10 +2760,6 @@ export function GameCanvas() {
 
     drawHittingGuidance(ctx, sim)
 
-    if (sim.phase === 'charging' && sim.pointer) {
-      drawChargeWindowArcWhite(ctx, sim)
-    }
-
     /** Hero glow: Layer B halos → spring (on halos, under crisp sprites) → sprites → shimmer. */
     if (sprites?.statue && sim.spriteLayout) {
       drawStatueSilhouetteHalo(
@@ -2682,15 +2814,9 @@ export function GameCanvas() {
     if (sprites?.bat && sim.spriteLayout) {
       drawBatSprite(ctx, sprites.bat, sim.spriteLayout, sim.theta)
     }
-    if (sim.spriteLayout) {
-      drawHeroShimmer(
-        ctx,
-        sim.spriteLayout,
-        sim.simTime,
-        sim.theta,
-        sim.phase,
-        sim.omega
-      )
+
+    if (sim.phase === 'charging' && sim.pointer) {
+      drawIdealSwingZoneArc(ctx, sim)
     }
 
     if (sim.phase === 'charging') {
@@ -2704,6 +2830,17 @@ export function GameCanvas() {
         fullSendLocked: sim.powerTierRelease === 'full_send',
         perfectSendLocked: sim.powerTierRelease === 'perfect_full_send',
       })
+    }
+
+    if (sim.spriteLayout) {
+      drawHeroShimmer(
+        ctx,
+        sim.spriteLayout,
+        sim.simTime,
+        sim.theta,
+        sim.phase,
+        sim.omega
+      )
     }
 
     if (sim.ball) {
@@ -3034,6 +3171,7 @@ export function GameCanvas() {
     const b = sim.ball
     if (b) {
       if (sim.ballRole === 'incoming') {
+        updateIncomingBallDepthRadius(sim, b)
         b.vy += sim.pitchIncomingAy * dt
         b.x += b.vx * dt
         b.y += b.vy * dt
@@ -3107,6 +3245,7 @@ export function GameCanvas() {
           if (out.bucket !== 'miss') {
             b.vx = out.vx
             b.vy = out.vy
+            b.r = BALL_R
             sim.ballRole = 'outgoing'
             sim.ballShotTier = out.tier
             sim.ballPierceArmed = out.tier === 'perfect_full_send'
@@ -3162,11 +3301,12 @@ export function GameCanvas() {
       }
 
       if (sim.ballRole === 'incoming') {
+        const br = Math.max(BALL_R, b.r)
         const oob =
-          b.x < -BALL_R * 2 ||
-          b.x > sim.w + BALL_R * 2 ||
-          b.y < -BALL_R * 2 ||
-          b.y > sim.h + BALL_R * 2
+          b.x < -br * 2 ||
+          b.x > sim.w + br * 2 ||
+          b.y < -br * 2 ||
+          b.y > sim.h + br * 2
         if (oob) {
           sim.ball = null
           sim.ballTrail = []
@@ -3242,6 +3382,7 @@ export function GameCanvas() {
       sim.ballOutgoingGravityMul = 1
       sim.ballExitBand = 'standard'
       sim.ballNextHitMinRing = null
+      sim.pitchSpawnSimTime = -1
     }
 
     draw()
