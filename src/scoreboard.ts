@@ -25,8 +25,8 @@ export const SCOREBOARD_TIME_LIMIT_SEC = 90
 
 /** Panel width at design scale = 1 (reference 1600×900). */
 const SCOREBOARD_PANEL_W_DESIGN = 300
-const SCOREBOARD_PANEL_H_DESIGN = 206
-const SCOREBOARD_PANEL_H_MULT_DESIGN = 248
+const SCOREBOARD_PANEL_H_DESIGN = 228
+const SCOREBOARD_PANEL_H_MULT_DESIGN = 270
 
 export function formatTimerMmSs(seconds: number): string {
   const s = Math.max(0, Math.floor(seconds + 1e-6))
@@ -59,6 +59,12 @@ function fontBebas(weight: number, designPx: number, scale: number): string {
   return `${weight} ${px}px "Bebas Neue", Impact, "Arial Narrow", sans-serif`
 }
 
+/** Collegiate / classic ballpark wordmark (Google Font *Graduate*). */
+function fontGraduate(designPx: number, scale: number): string {
+  const px = Math.max(8, Math.round(designPx * scale))
+  return `400 ${px}px "Graduate", "Ultra", "Rockwell", serif`
+}
+
 /**
  * Upper-right scoreboard box in **logical canvas** coords (axis-aligned; ignores skew transform).
  */
@@ -66,10 +72,12 @@ export function getScoreboardScreenRect(
   w: number,
   h: number,
   p: ScoreboardDrawParams,
-  layoutScale: number
+  layoutScale: number,
+  /** Slightly shrink board on tight mobile layouts (default 1). */
+  scaleMul = 1
 ): ScoreboardScreenRect {
   const m = Math.min(w, h)
-  const s = layoutScale
+  const s = layoutScale * scaleMul
   const marginX = m * 0.022 + 14 * s
   const marginY = m * 0.02 + 12 * s
   const hasMult = (p.comboMultiplier ?? 1) > 1.001
@@ -89,10 +97,11 @@ export function drawRetroScoreboard(
   w: number,
   h: number,
   p: ScoreboardDrawParams,
-  layoutScale: number
+  layoutScale: number,
+  scaleMul = 1
 ): void {
   const m = Math.min(w, h)
-  const s = layoutScale
+  const s = layoutScale * scaleMul
   const marginX = m * 0.022 + 14 * s
   const marginY = m * 0.02 + 12 * s
 
@@ -152,12 +161,59 @@ export function drawRetroScoreboard(
   const padX = 20 * s
   ctx.textAlign = 'left'
 
-  let cursorY = 16 * s
+  const titleMain = 'Bat Snap Derby'
+  const titleSub = "Featuring Ichiro's Statue!"
+
+  let cursorY = 14 * s
   ctx.textBaseline = 'top'
-  ctx.font = fontOswald(600, 11, s)
-  ctx.fillStyle = 'rgba(195, 228, 215, 0.75)'
-  ctx.fillText('NIGHT PARK', padX, cursorY)
-  cursorY += 24 * s
+
+  let titleDesignPx = 15
+  const maxTitleW = panelW - padX * 2 - 6 * s
+  for (;;) {
+    ctx.font = fontGraduate(titleDesignPx, s)
+    if (ctx.measureText(titleMain).width <= maxTitleW || titleDesignPx <= 9) {
+      break
+    }
+    titleDesignPx -= 1
+  }
+
+  ctx.font = fontGraduate(titleDesignPx, s)
+  const titleMetrics = ctx.measureText(titleMain)
+  const titleLineH =
+    (titleMetrics.actualBoundingBoxAscent ?? 12 * s) +
+    (titleMetrics.actualBoundingBoxDescent ?? 3 * s) +
+    4 * s
+
+  const titleY = cursorY
+  ctx.save()
+  try {
+    ;(ctx as CanvasRenderingContext2D & { letterSpacing?: string }).letterSpacing =
+      `${Math.max(0.5, 1.1 * s)}px`
+  } catch {
+    /* letterSpacing not supported in all environments */
+  }
+  ctx.font = fontGraduate(titleDesignPx, s)
+  ctx.lineWidth = Math.max(1.25, 2.4 * s)
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.58)'
+  ctx.lineJoin = 'round'
+  ctx.strokeText(titleMain, padX, titleY)
+  ctx.fillStyle = 'rgba(255, 246, 232, 0.98)'
+  ctx.fillText(titleMain, padX, titleY)
+  ctx.restore()
+
+  cursorY = titleY + titleLineH
+
+  let subDesignPx = 8.5
+  for (;;) {
+    ctx.font = fontOswald(500, subDesignPx, s)
+    if (ctx.measureText(titleSub).width <= maxTitleW || subDesignPx <= 6.5) {
+      break
+    }
+    subDesignPx -= 0.5
+  }
+  ctx.fillStyle = 'rgba(175, 210, 198, 0.88)'
+  ctx.fillText(titleSub, padX, cursorY)
+  cursorY += Math.max(13 * s, (subDesignPx * s * 0.95 + 6 * s))
 
   ctx.font = fontOswald(600, 12, s)
   ctx.fillStyle = 'rgba(160, 210, 195, 0.9)'

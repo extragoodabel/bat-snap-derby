@@ -19,7 +19,9 @@ import {
   segmentCircleEarliestHit,
   type Vec2,
 } from './physics'
+import { useGameLayout } from './gameLayout'
 import { useGameLoop } from './useGameLoop'
+import { MobileArcadeControls } from './MobileArcadeControls'
 import { drawSpring } from './drawSpring'
 import {
   drawBackgroundImage,
@@ -33,6 +35,13 @@ import {
   type LoadedGameSprites,
   type SpriteLayout,
 } from './gameSprites'
+import {
+  drawPitcher,
+  getPitcherReleaseSpawnScreen,
+  loadPitcherPack,
+  timeToNextPitcherReleasePhase,
+  type PitcherPack,
+} from './pitcherAnimation'
 import {
   drawAtmosphericBackGlow,
   drawBatSilhouetteHalo,
@@ -55,7 +64,6 @@ import {
   type ParachutePayload,
 } from './cloudTargets'
 import {
-  BALL_PAST_PLATE_DX_DESIGN,
   BALL_R_DESIGN,
   computeSceneLayout,
   CONTACT_ZONE_R_DESIGN,
@@ -211,9 +219,9 @@ const PITCH_CADENCE_SEC = 0.88
 const PITCH_CADENCE_JITTER_SEC = 0.2
 /** Cap simultaneous incoming balls so the plate stays readable. */
 const MAX_INCOMING_PITCHES = 3
-/** Incoming pitch speed band (px/s); fast, batting-like. */
-const PITCH_SPEED_MIN = 1260
-const PITCH_SPEED_MAX = 1680
+/** Incoming pitch speed band (px/s); tuned for readable reaction + contact timing. */
+const PITCH_SPEED_MIN = 880
+const PITCH_SPEED_MAX = 1160
 /** Small vertical accel on incoming ball only (shallow arc; not full gravity). */
 const PITCH_INCOMING_AY_MIN = -140
 const PITCH_INCOMING_AY_MAX = 120
@@ -231,7 +239,8 @@ const PITCH_MOUND_Y_FR = 15 / 16
 /**
  * Incoming ball radius multiplier at release (grows to 1.0 by ideal contact time).
  */
-const PITCH_DEPTH_START_R_MUL = 0.32
+/** Smaller at release → clearer “approach” as radius ramps to full near the plate. */
+const PITCH_DEPTH_START_R_MUL = 0.22
 /**
  * Incoming pitch aims along the launch bat but caps distance from pivot so the
  * target stays over the infield. Uncapped length from oversized sprite bats
@@ -316,6 +325,9 @@ type IncomingPitch = {
   ball: Ball
   idealContactTime: number
   pitchSpawnSimTime: number
+  /** Logical spawn (mound / hand); guidance line uses this so it matches trajectory. */
+  pitchSpawnX: number
+  pitchSpawnY: number
   pitchContactResolved: boolean
   pitchContactFracT: number
   pitchSpeedNominal: number
@@ -381,6 +393,48 @@ function pointerToBatThetaRaw(px: number, py: number, ptr: Vec2): number {
 function thetaChargeFromPointer(px: number, py: number, ptr: Vec2): number {
   const raw = pointerToBatThetaRaw(px, py, ptr)
   return clamp(raw, THETA_CHARGE_MIN, THETA_CHARGE_MAX)
+}
+
+/** Normalized joystick vector (−1…1); maps to same θ arc as pivot→pointer on desktop. */
+const MOBILE_JOYSTICK_DEADZONE = 0.14
+
+function thetaFromNormalizedJoystick(
+  pivot: Vec2,
+  jx: number,
+  jy: number
+): number {
+  const m = Math.hypot(jx, jy)
+  if (m < MOBILE_JOYSTICK_DEADZONE) return THETA_REST
+  const ux = jx / m
+  const uy = jy / m
+  return thetaChargeFromPointer(pivot.x, pivot.y, {
+    x: pivot.x + ux * 520,
+    y: pivot.y + uy * 520,
+  })
+}
+
+function canBeginBatGrab(sim: Sim): boolean {
+  return (
+    sim.phase === 'idle' ||
+    (sim.phase === 'swing' && sim.swingGrabLockoutRemain <= 0) ||
+    sim.phase === 'recovery'
+  )
+}
+
+function cancelMobileCharge(sim: Sim): void {
+  if (sim.phase !== 'charging' || !sim.mobileChargeViaControls) return
+  sim.phase = 'idle'
+  sim.theta = THETA_REST
+  sim.omega = 0
+  sim.springSwingT0 = null
+  sim.chargeElapsed = 0
+  sim.pCurrent = 0
+  sim.pRelease = 0
+  sim.powerTierRelease = 'normal'
+  sim.releaseFlashTier = null
+  sim.releaseFlashRemain = 0
+  sim.pitchArmElapsed = 0
+  sim.mobileChargeViaControls = false
 }
 
 /** Ease-out: strong gains early, compressed top end so max p is not absurdly faster. */
@@ -528,6 +582,8 @@ type Sim = {
   ballTrail: Vec2[]
 
   pointer: Vec2 | null
+  /** Mobile: charging via virtual joystick (not canvas pointer / bat grab). */
+  mobileChargeViaControls: boolean
   /** Monotonic sim clock (s) for pitch + swing timing. */
   simTime: number
   /** When bat crossed the launch plane this swing; null until then. */
@@ -573,6 +629,7 @@ type Sim = {
   cloudTargets: CloudTarget[]
   parachutePayloads: ParachutePayload[]
   cloudSpawnCountdown: number
+  heavenHotdogCountdown: number
   nextFloatingTargetId: number
 
   /** Single responsive scale vs 1600×900 design reference. */
@@ -1004,6 +1061,7 @@ function createSim(w: number, h: number): Sim {
     shakeRemain: 0,
     ballTrail: [],
     pointer: null,
+    mobileChargeViaControls: false,
     simTime: 0,
     batCrossLaunchTime: null,
     springSwingT0: null,
@@ -1040,6 +1098,7 @@ function createSim(w: number, h: number): Sim {
     cloudTargets: [],
     parachutePayloads: [],
     cloudSpawnCountdown: 0,
+    heavenHotdogCountdown: 0,
     nextFloatingTargetId: 1,
   }
   initFloatingCloudLayer(sim)
@@ -1674,7 +1733,12 @@ function computePitchHud(sim: Sim): PitchHudState {
   if (sim.debugContactFlash > 0) return 'contact'
   if (sim.ballRole === 'outgoing') return 'outgoing'
   if (sim.incomingPitches.length > 0) return 'incoming'
-  if (sim.phase === 'charging' && sim.pointer) return 'armed'
+  if (
+    sim.phase === 'charging' &&
+    (sim.pointer != null || sim.mobileChargeViaControls)
+  ) {
+    return 'armed'
+  }
   return 'idle'
 }
 
@@ -1765,9 +1829,8 @@ function drawHittingGuidance(ctx: CanvasRenderingContext2D, sim: Sim): void {
   const primary = primaryIncomingForGuidance(sim)
   if (primary == null || primary.idealContactTime <= 0) return
   const ix = pitchPlannedContactPoint(sim, primary.pitchContactFracT)
-  const mound = pitchMoundScreenPoint(sim, primary.pitchReleaseDyPx)
-  const moundX = mound.x
-  const moundY = mound.y
+  const moundX = primary.pitchSpawnX
+  const moundY = primary.pitchSpawnY
 
   ctx.save()
 
@@ -2250,6 +2313,11 @@ type DynamicBallDrawOpts = {
   redFlames?: boolean
   stretchMul?: number
   brightBall?: boolean
+  /**
+   * Pitched ball: keep a round silhouette (no velocity stretch) and no motion smear.
+   * Otherwise stretch + smear extend along +v and read like a speed stripe *ahead* of the ball.
+   */
+  incomingPitch?: boolean
 }
 
 /** Draw ball with velocity-aligned stretch + backward smear (reads as blur in motion). */
@@ -2266,13 +2334,16 @@ function drawDynamicBall(
   stroke: boolean,
   opts?: DynamicBallDrawOpts
 ): number {
-  const smearThreshold = opts?.smearThreshold ?? 55
+  const incomingPitch = opts?.incomingPitch === true
+  const smearThreshold = incomingPitch
+    ? Number.POSITIVE_INFINITY
+    : opts?.smearThreshold ?? 55
   const streakMul = opts?.streakMul ?? 1
   const blurSteps = Math.min(
     10,
     Math.max(3, opts?.motionBlurSteps ?? BALL_MOTION_BLUR_STEPS)
   )
-  const stretchMul = opts?.stretchMul ?? 1
+  const stretchMul = incomingPitch ? 0 : opts?.stretchMul ?? 1
   const brightBall = opts?.brightBall ?? false
 
   const sp = Math.hypot(vx, vy)
@@ -2307,7 +2378,7 @@ function drawDynamicBall(
     ctx.restore()
   }
 
-  if (opts?.speedLines && sp > 32) {
+  if (!incomingPitch && opts?.speedLines && sp > 32) {
     const ux = vx / sp
     const uy = vy / sp
     const px = -uy
@@ -2339,7 +2410,9 @@ function drawDynamicBall(
   ctx.translate(x, y)
   ctx.rotate(angle)
   ctx.scale(stretch, squash)
-  ctx.shadowBlur = (brightBall ? 6 : 4) + Math.min(sp / 140, 10)
+  ctx.shadowBlur = incomingPitch
+    ? 3
+    : (brightBall ? 6 : 4) + Math.min(sp / 140, 10)
   ctx.shadowColor = brightBall
     ? 'rgba(100, 160, 255, 0.42)'
     : 'rgba(0, 0, 0, 0.35)'
@@ -2355,7 +2428,7 @@ function drawDynamicBall(
   }
   ctx.restore()
 
-  if (opts?.redFlames && sp > 120) {
+  if (!incomingPitch && opts?.redFlames && sp > 120) {
     const ux = vx / sp
     const uy = vy / sp
     const px = -uy
@@ -2580,7 +2653,10 @@ function nextPitchCadenceInterval(sim: Sim): number {
 }
 
 /** Fire one pitch from mound toward the planned barrel contact point. */
-function trySpawnIncomingPitch(sim: Sim, opts?: { auto?: boolean }): void {
+function trySpawnIncomingPitch(
+  sim: Sim,
+  opts?: { auto?: boolean; pack?: PitcherPack | null }
+): void {
   if (sim.incomingPitches.length >= MAX_INCOMING_PITCHES) return
   sim.pitchSeq += 1
   const seq = sim.pitchSeq
@@ -2588,7 +2664,9 @@ function trySpawnIncomingPitch(sim: Sim, opts?: { auto?: boolean }): void {
   sim.debugAutoPitch = opts?.auto ?? false
 
   const target = pitchPlannedContactPoint(sim, variant.pitchContactFracT)
-  const start = pitchMoundScreenPoint(sim, variant.pitchReleaseDyPx)
+  const start =
+    getPitcherReleaseSpawnScreen(sim.w, sim.h, opts?.pack ?? null) ??
+    pitchMoundScreenPoint(sim, variant.pitchReleaseDyPx)
   const dx = target.x - start.x
   const dy = target.y - start.y
   const len = Math.hypot(dx, dy) || 1
@@ -2597,7 +2675,7 @@ function trySpawnIncomingPitch(sim: Sim, opts?: { auto?: boolean }): void {
   const vy = (dy / len) * sp
   const travelSec =
     Math.abs(vx) > 80 ? (target.x - start.x) / vx : len / sp
-  const idealContactTime = sim.simTime + clamp(travelSec, 0.06, 1.35)
+  const idealContactTime = sim.simTime + clamp(travelSec, 0.08, 1.62)
 
   sim.incomingPitches.push({
     ball: {
@@ -2609,6 +2687,8 @@ function trySpawnIncomingPitch(sim: Sim, opts?: { auto?: boolean }): void {
     },
     idealContactTime,
     pitchSpawnSimTime: sim.simTime,
+    pitchSpawnX: start.x,
+    pitchSpawnY: start.y,
     pitchContactResolved: false,
     pitchContactFracT: variant.pitchContactFracT,
     pitchSpeedNominal: variant.pitchSpeedNominal,
@@ -2624,14 +2704,19 @@ function trySpawnIncomingPitch(sim: Sim, opts?: { auto?: boolean }): void {
 let lastSpriteThetaLogMs = 0
 
 export function GameCanvas() {
+  const layout = useGameLayout()
+  const layoutRef = useRef(layout)
+  layoutRef.current = layout
+
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const simRef = useRef<Sim | null>(null)
   const spritesRef = useRef<LoadedGameSprites | null>(null)
+  const pitcherPackRef = useRef<PitcherPack | null>(null)
   const devDrawOptionsRef = useRef<DevDrawOptions>({
-    clipDiscLowerHalf: false,
-    revealHiddenLayers: true,
-    showLauncherDebugHud: true,
+    clipDiscLowerHalf: true,
+    revealHiddenLayers: false,
+    showLauncherDebugHud: false,
     showSpriteDebug: false,
     transparencyUnderlayTest: false,
     enableSpinningDiscs: true,
@@ -2639,9 +2724,9 @@ export function GameCanvas() {
   })
 
   const [devToolsOpen, setDevToolsOpen] = useState(false)
-  const [clipDiscLowerHalf, setClipDiscLowerHalf] = useState(false)
-  const [revealHiddenLayers, setRevealHiddenLayers] = useState(true)
-  const [showLauncherDebugHud, setShowLauncherDebugHud] = useState(true)
+  const [clipDiscLowerHalf, setClipDiscLowerHalf] = useState(true)
+  const [revealHiddenLayers, setRevealHiddenLayers] = useState(false)
+  const [showLauncherDebugHud, setShowLauncherDebugHud] = useState(false)
   const [showSpriteDebug, setShowSpriteDebug] = useState(false)
   const [transparencyUnderlayTest, setTransparencyUnderlayTest] =
     useState(false)
@@ -2651,6 +2736,12 @@ export function GameCanvas() {
   const boardAspectRef = useRef(FALLBACK_BOARD_ASPECT)
   const [devToolsHostEl, setDevToolsHostEl] = useState<HTMLElement | null>(null)
   const launcherHudPreRef = useRef<HTMLPreElement | null>(null)
+  const mobileJoystickVecRef = useRef({ x: 0, y: 0 })
+  const mobileRapidFireRef = useRef(false)
+  const rapidFireNextSimTimeRef = useRef(Number.POSITIVE_INFINITY)
+  const endChargeRef = useRef<((sim: Sim) => void) | null>(null)
+  const [mobileRapidFire, setMobileRapidFire] = useState(false)
+  const prevMobileRapidFireRef = useRef(false)
 
   const resize = useCallback(() => {
     const container = containerRef.current
@@ -2667,6 +2758,15 @@ export function GameCanvas() {
     }
     vw = Math.max(1, vw - frame.x)
     vh = Math.max(1, vh - frame.y)
+
+    const csRoot = getComputedStyle(document.documentElement)
+    const portraitBand =
+      parseFloat(csRoot.getPropertyValue('--mobile-portrait-controls-reserved').trim()) ||
+      0
+    const layoutKind = document.documentElement.dataset.gameLayout
+    if (layoutKind === 'mobile-portrait' && portraitBand > 0) {
+      vh = Math.max(1, vh - portraitBand)
+    }
 
     const aspect = boardAspectRef.current
     let w: number
@@ -2706,6 +2806,18 @@ export function GameCanvas() {
 
   useEffect(() => {
     let cancelled = false
+    loadPitcherPack().then((pack) => {
+      if (cancelled) return
+      pitcherPackRef.current = pack
+      setSpritesRevision((n) => n + 1)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
     loadGameSprites()
       .then((loaded) => {
         if (cancelled) return
@@ -2740,9 +2852,34 @@ export function GameCanvas() {
     }
   }, [resize])
 
+  /** Re-measure when mobile/desktop frame CSS variables change. */
+  useEffect(() => {
+    resize()
+  }, [resize, layout.kind])
+
   useLayoutEffect(() => {
+    if (layout.isMobile) {
+      setDevToolsHostEl(null)
+      return
+    }
     setDevToolsHostEl(document.getElementById('game-dev-tools-host'))
-  }, [])
+  }, [layout.isMobile])
+
+  useEffect(() => {
+    const prev = prevMobileRapidFireRef.current
+    prevMobileRapidFireRef.current = mobileRapidFire
+    mobileRapidFireRef.current = mobileRapidFire
+    if (!mobileRapidFire) {
+      rapidFireNextSimTimeRef.current = Number.POSITIVE_INFINITY
+      return
+    }
+    if (layout.isMobile && !prev && mobileRapidFire) {
+      const sim = simRef.current
+      if (sim?.phase === 'idle' && sim.swingGrabLockoutRemain <= 0) {
+        rapidFireNextSimTimeRef.current = sim.simTime + 0.22
+      }
+    }
+  }, [mobileRapidFire, layout.isMobile])
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current
@@ -2861,6 +2998,8 @@ export function GameCanvas() {
       ctx.restore()
     }
 
+    drawPitcher(ctx, w, h, sim.simTime, pitcherPackRef.current, 'idleLoop')
+
     drawFloatingCloudLayer(ctx, sim)
 
     if (sim.spriteLayout) {
@@ -2964,7 +3103,9 @@ export function GameCanvas() {
       const b = inc.ball
       const fill = '#f2e6d8'
       const stroke = 'rgba(200, 120, 60, 0.75)'
-      drawDynamicBall(ctx, b.x, b.y, b.r, b.vx, b.vy, fill, stroke, 2, true)
+      drawDynamicBall(ctx, b.x, b.y, b.r, b.vx, b.vy, fill, stroke, 2, true, {
+        incomingPitch: true,
+      })
     }
 
     if (sim.ball && sim.ballRole === 'outgoing') {
@@ -3043,6 +3184,7 @@ export function GameCanvas() {
       }
     }
 
+    const scoreboardScaleMul = layoutRef.current.isMobile ? 0.88 : 1
     drawRetroScoreboard(
       ctx,
       w,
@@ -3053,7 +3195,8 @@ export function GameCanvas() {
         timerRemainingSec: sim.timerRemainingSec,
         comboMultiplier: sim.comboMultiplier,
       },
-      sim.sceneLayout.scale
+      sim.sceneLayout.scale,
+      scoreboardScaleMul
     )
 
     if (dev.showSceneLayoutDebug) {
@@ -3086,7 +3229,9 @@ export function GameCanvas() {
       }
     }
 
-    if (sim.phase === 'charging' && sim.pointer) {
+    if (layoutRef.current.isMobile) {
+      canvas.style.cursor = 'default'
+    } else if (sim.phase === 'charging' && sim.pointer) {
       canvas.style.cursor = 'grabbing'
     } else if (sim.pointer && nearBat(sim)) {
       canvas.style.cursor = 'grab'
@@ -3123,6 +3268,8 @@ export function GameCanvas() {
     const sim = simRef.current
     if (!sim) return
 
+    const phaseAtFrameEntry = sim.phase
+
     sim.simTime += dt
     updateFloatingCloudLayer(sim, dt)
 
@@ -3156,13 +3303,23 @@ export function GameCanvas() {
     }
     sim.debugContactFlash = Math.max(0, sim.debugContactFlash - dt)
 
-    if (sim.phase === 'charging' && sim.pointer) {
+    const chargingViaPointer =
+      sim.phase === 'charging' && sim.pointer != null && !sim.mobileChargeViaControls
+    const chargingViaMobile =
+      sim.phase === 'charging' && sim.mobileChargeViaControls
+
+    if (chargingViaPointer || chargingViaMobile) {
       sim.chargeElapsed += dt
-      sim.theta = thetaChargeFromPointer(
-        sim.pivot.x,
-        sim.pivot.y,
-        sim.pointer
-      )
+      if (chargingViaPointer) {
+        sim.theta = thetaChargeFromPointer(
+          sim.pivot.x,
+          sim.pivot.y,
+          sim.pointer!
+        )
+      } else {
+        const j = mobileJoystickVecRef.current
+        sim.theta = thetaFromNormalizedJoystick(sim.pivot, j.x, j.y)
+      }
       sim.pCurrent = pullbackNormalizedFromVisualTheta(sim.theta)
       sim.omega = 0
       sim.pitchArmElapsed += dt
@@ -3224,7 +3381,8 @@ export function GameCanvas() {
     if (
       errPred != null &&
       prevPrimary != null &&
-      ((sim.phase === 'charging' && sim.pointer) ||
+      ((sim.phase === 'charging' &&
+        (sim.pointer != null || sim.mobileChargeViaControls)) ||
         sim.phase === 'swing' ||
         sim.phase === 'recovery')
     ) {
@@ -3324,9 +3482,6 @@ export function GameCanvas() {
       const inZone = d2 <= cz * cz && inUpperBarrel
       const inSwingArc =
         thetaHit <= CONTACT_THETA_EARLY && thetaHit >= CONTACT_THETA_LATE
-      const pastPlate =
-        b.x > ix.x + designPx(sim.sceneLayout, BALL_PAST_PLATE_DX_DESIGN) &&
-        b.vx > 40
       const swingOk =
         (sim.phase === 'swing' || sim.phase === 'recovery') &&
         sim.pRelease > POWER_DEADZONE &&
@@ -3420,11 +3575,6 @@ export function GameCanvas() {
           }
           break
         }
-      }
-
-      if (pastPlate) {
-        sim.incomingPitches.splice(i, 1)
-        i--
       }
     }
 
@@ -3526,15 +3676,58 @@ export function GameCanvas() {
     sim.pitchNextIn -= dt
     if (sim.pitchNextIn <= 0) {
       if (sim.incomingPitches.length < MAX_INCOMING_PITCHES) {
-        trySpawnIncomingPitch(sim)
+        const wait = timeToNextPitcherReleasePhase(sim.simTime)
+        if (wait > 1e-4) {
+          sim.pitchNextIn = wait
+        } else {
+          trySpawnIncomingPitch(sim, { pack: pitcherPackRef.current })
+          sim.pitchNextIn = nextPitchCadenceInterval(sim)
+        }
+      } else {
+        sim.pitchNextIn += nextPitchCadenceInterval(sim)
       }
-      sim.pitchNextIn += nextPitchCadenceInterval(sim)
+    }
+
+    const layoutM = layoutRef.current.isMobile
+    if (
+      layoutM &&
+      mobileRapidFireRef.current &&
+      phaseAtFrameEntry === 'recovery' &&
+      sim.phase === 'idle'
+    ) {
+      rapidFireNextSimTimeRef.current = sim.simTime + 0.12
+    }
+    if (
+      layoutM &&
+      mobileRapidFireRef.current &&
+      sim.phase === 'idle' &&
+      sim.swingGrabLockoutRemain <= 0 &&
+      sim.simTime >= rapidFireNextSimTimeRef.current
+    ) {
+      rapidFireNextSimTimeRef.current = Number.POSITIVE_INFINITY
+      const j = mobileJoystickVecRef.current
+      const jm = Math.hypot(j.x, j.y)
+      const sign = jm > 0.12 ? Math.sign(j.x) || -1 : -1
+      const thetaFull = sign >= 0 ? THETA_RIGHT : THETA_LEFT
+      sim.phase = 'charging'
+      sim.mobileChargeViaControls = true
+      sim.theta = thetaFull
+      sim.pCurrent = 1
+      sim.omega = 0
+      sim.chargeElapsed = 0
+      sim.springSwingT0 = null
+      sim.pitchArmElapsed = 0
+      sim.batCrossLaunchTime = null
+      sim.pointer = null
+      endChargeRef.current?.(sim)
+      sim.mobileChargeViaControls = false
     }
 
     draw()
   })
 
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (layoutRef.current.isMobile) return
     e.currentTarget.setPointerCapture(e.pointerId)
     const sim = simRef.current
     const canvas = canvasRef.current
@@ -3559,6 +3752,7 @@ export function GameCanvas() {
         console.log('bat: grab overrides', sim.phase)
       }
       sim.phase = 'charging'
+      sim.mobileChargeViaControls = false
       sim.recoverySettling = false
       sim.springSwingT0 = null
       sim.chargeElapsed = 0
@@ -3576,6 +3770,7 @@ export function GameCanvas() {
   }
 
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (layoutRef.current.isMobile) return
     const sim = simRef.current
     const canvas = canvasRef.current
     if (!sim || !canvas) return
@@ -3590,6 +3785,8 @@ export function GameCanvas() {
 
   const endCharge = (sim: Sim) => {
     if (sim.phase !== 'charging') return
+
+    sim.mobileChargeViaControls = false
 
     sim.pRelease = sim.pCurrent
     sim.thetaRelease = sim.theta
@@ -3619,7 +3816,60 @@ export function GameCanvas() {
     }
   }
 
+  endChargeRef.current = endCharge
+
+  const onJoystickActiveChange = useCallback(
+    (active: boolean) => {
+      const sim = simRef.current
+      if (!sim || !layoutRef.current.isMobile) return
+      if (active) {
+        if (!canBeginBatGrab(sim)) return
+        if (sim.phase === 'swing' || sim.phase === 'recovery') {
+          sim.batInterruptFlashRemain = 0.45
+        }
+        sim.phase = 'charging'
+        sim.recoverySettling = false
+        sim.springSwingT0 = null
+        sim.chargeElapsed = 0
+        sim.omega = 0
+        sim.pitchArmElapsed = 0
+        sim.batCrossLaunchTime = null
+        sim.pointer = null
+        sim.mobileChargeViaControls = true
+        const j = mobileJoystickVecRef.current
+        sim.theta = thetaFromNormalizedJoystick(sim.pivot, j.x, j.y)
+        sim.pCurrent = pullbackNormalizedFromVisualTheta(sim.theta)
+      } else if (sim.phase === 'charging' && sim.mobileChargeViaControls) {
+        cancelMobileCharge(sim)
+      }
+      draw()
+    },
+    [draw]
+  )
+
+  const onJoystickOffset = useCallback(
+    (x: number, y: number) => {
+      mobileJoystickVecRef.current = { x, y }
+      const sim = simRef.current
+      if (sim?.phase === 'charging' && sim.mobileChargeViaControls) {
+        sim.theta = thetaFromNormalizedJoystick(sim.pivot, x, y)
+        sim.pCurrent = pullbackNormalizedFromVisualTheta(sim.theta)
+        draw()
+      }
+    },
+    [draw]
+  )
+
+  const onSwingPointerUp = useCallback(() => {
+    const sim = simRef.current
+    if (!sim || !layoutRef.current.isMobile) return
+    if (sim.phase !== 'charging' || !sim.mobileChargeViaControls) return
+    endCharge(sim)
+    draw()
+  }, [draw])
+
   const onPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (layoutRef.current.isMobile) return
     const sim = simRef.current
     if (!sim) return
 
@@ -3636,7 +3886,14 @@ export function GameCanvas() {
   const onPointerLeave = () => {
     const sim = simRef.current
     if (!sim) return
-    if (sim.phase === 'charging') {
+    if (layoutRef.current.isMobile) {
+      sim.pointer = null
+      const c = canvasRef.current
+      if (c) c.style.cursor = ''
+      draw()
+      return
+    }
+    if (sim.phase === 'charging' && !sim.mobileChargeViaControls) {
       sim.phase = 'idle'
       sim.theta = THETA_REST
       sim.omega = 0
@@ -3655,7 +3912,8 @@ export function GameCanvas() {
     draw()
   }
 
-  const devToolsPanel = (
+  /** Lazily invoked so mobile never allocates this subtree. */
+  const renderDevToolsPanel = () => (
     <div
       className="game-dev-tools"
       style={{
@@ -3682,16 +3940,6 @@ export function GameCanvas() {
       >
         {devToolsOpen ? '▼ Dev' : '▶ Dev'}
       </button>
-      <pre
-        ref={launcherHudPreRef}
-        className="game-launcher-hud-pre"
-        style={{
-          display: showLauncherDebugHud ? 'block' : 'none',
-          marginTop: 6,
-          whiteSpace: 'pre-wrap',
-          wordBreak: 'break-word',
-        }}
-      />
       {devToolsOpen && (
         <div
           style={{
@@ -3787,21 +4035,6 @@ export function GameCanvas() {
               display: 'flex',
               alignItems: 'center',
               gap: 5,
-              cursor: 'pointer',
-            }}
-          >
-            <input
-              type="checkbox"
-              checked={showLauncherDebugHud}
-              onChange={(e) => setShowLauncherDebugHud(e.target.checked)}
-            />
-            Launcher telemetry (off-canvas)
-          </label>
-          <label
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 5,
               marginTop: 4,
               cursor: 'pointer',
             }}
@@ -3845,32 +4078,83 @@ export function GameCanvas() {
             />
             Transparency test
           </label>
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              marginTop: 8,
+              cursor: 'pointer',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={showLauncherDebugHud}
+              onChange={(e) => setShowLauncherDebugHud(e.target.checked)}
+            />
+            Launcher telemetry (off-canvas)
+          </label>
         </div>
       )}
+      <pre
+        ref={launcherHudPreRef}
+        className="game-launcher-hud-pre"
+        style={{
+          display:
+            devToolsOpen && showLauncherDebugHud ? 'block' : 'none',
+          marginTop: devToolsOpen ? 6 : 0,
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+        }}
+      />
     </div>
   )
 
+  const shellClass = [
+    'game-canvas-shell',
+    layout.isMobile ? 'game-canvas-shell--mobile' : '',
+    layout.isPortraitMobile ? 'game-canvas-shell--portrait' : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
+
   return (
     <>
-      <div
-        ref={containerRef}
-        style={{
-          display: 'block',
-          position: 'relative',
-          flexShrink: 0,
-        }}
-      >
-        <canvas
-          ref={canvasRef}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerCancel={onPointerUp}
-          onPointerLeave={onPointerLeave}
-        style={{ touchAction: 'none', display: 'block' }}
-      />
+      <div className={shellClass}>
+        <div className="game-canvas-shell__board">
+          <div
+            ref={containerRef}
+            style={{
+              display: 'block',
+              position: 'relative',
+              flexShrink: 0,
+            }}
+          >
+            <canvas
+              ref={canvasRef}
+              onPointerDown={onPointerDown}
+              onPointerMove={onPointerMove}
+              onPointerUp={onPointerUp}
+              onPointerCancel={onPointerUp}
+              onPointerLeave={onPointerLeave}
+              style={{ touchAction: 'none', display: 'block' }}
+            />
+          </div>
+        </div>
+        {layout.isMobile ? (
+          <MobileArcadeControls
+            variant={layout.isPortraitMobile ? 'portrait' : 'landscape'}
+            onJoystickActiveChange={onJoystickActiveChange}
+            onJoystickOffset={onJoystickOffset}
+            onSwingPointerUp={onSwingPointerUp}
+            rapidFireEnabled={mobileRapidFire}
+            onRapidFireChange={setMobileRapidFire}
+          />
+        ) : null}
       </div>
-      {devToolsHostEl ? createPortal(devToolsPanel, devToolsHostEl) : null}
+      {!layout.isMobile && devToolsHostEl
+        ? createPortal(renderDevToolsPanel(), devToolsHostEl)
+        : null}
     </>
   )
 }

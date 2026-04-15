@@ -42,7 +42,6 @@ export const PITCH_MOUND_NUDGE_UP_DESIGN = 100
 export const CONTACT_ZONE_R_DESIGN = 248
 export const BALL_R_DESIGN = 9
 export const GRAB_THRESH_BASE_DESIGN = 52
-export const BALL_PAST_PLATE_DX_DESIGN = 128
 
 // --- Power bar (design px) --------------------------------------------------
 

@@ -1,8 +1,13 @@
 import { GameCanvas } from './GameCanvas'
+import { useGameLayout } from './gameLayout'
+import { RotatePlayHint } from './RotatePlayHint'
 
 function App() {
+  const layout = useGameLayout()
+
   return (
     <div className="app-page">
+      {layout.isPortraitMobile ? <RotatePlayHint /> : null}
       <div className="app-page__row">
         <div className="app-page__game-column">
           {/* Fit probe: same box the framed cabinet must fit in (excludes dev aside). */}
@@ -23,11 +28,13 @@ function App() {
             </div>
           </div>
         </div>
-        <aside
-          id="game-dev-tools-host"
-          className="game-dev-aside"
-          aria-label="Developer tools"
-        />
+        {!layout.isMobile ? (
+          <aside
+            id="game-dev-tools-host"
+            className="game-dev-aside"
+            aria-label="Developer tools"
+          />
+        ) : null}
       </div>
     </div>
   )

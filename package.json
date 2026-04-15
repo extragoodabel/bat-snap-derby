@@ -10,7 +10,8 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "assets:webp-bg": "node scripts/encode-bg-stadium-webp.mjs",
-    "assets:webp-sprites": "node scripts/convert-png-assets-to-webp.mjs"
+    "assets:webp-sprites": "node scripts/convert-png-assets-to-webp.mjs",
+    "assets:webp-pitcher": "node scripts/convert-pitcher-png-to-webp.mjs"
   },
   "dependencies": {
     "react": "^19.2.4",
