@@ -63,6 +63,7 @@ import {
   type CloudTarget,
   type ParachutePayload,
 } from './cloudTargets'
+import { loadCloudTargetPack, type CloudTargetPack } from './cloudSprites'
 import {
   BALL_R_DESIGN,
   computeSceneLayout,
@@ -2696,6 +2697,7 @@ export function GameCanvas() {
   const simRef = useRef<Sim | null>(null)
   const spritesRef = useRef<LoadedGameSprites | null>(null)
   const pitcherPackRef = useRef<PitcherPack | null>(null)
+  const cloudPackRef = useRef<CloudTargetPack | null>(null)
   const devDrawOptionsRef = useRef<DevDrawOptions>({
     clipDiscLowerHalf: true,
     revealHiddenLayers: false,
@@ -2792,6 +2794,23 @@ export function GameCanvas() {
     loadPitcherPack().then((pack) => {
       if (cancelled) return
       pitcherPackRef.current = pack
+      setSpritesRevision((n) => n + 1)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    loadCloudTargetPack().then((pack) => {
+      if (cancelled) return
+      cloudPackRef.current = pack
+      if (!pack) {
+        console.info(
+          '[clouds] WebP pack failed to load from /assets/clouds/ — using placeholder clouds.'
+        )
+      }
       setSpritesRevision((n) => n + 1)
     })
     return () => {
@@ -2983,7 +3002,7 @@ export function GameCanvas() {
 
     drawPitcher(ctx, w, h, sim.simTime, pitcherPackRef.current, 'idleLoop')
 
-    drawFloatingCloudLayer(ctx, sim)
+    drawFloatingCloudLayer(ctx, sim, cloudPackRef.current)
 
     if (sim.spriteLayout) {
       drawAtmosphericBackGlow(
@@ -3429,7 +3448,8 @@ export function GameCanvas() {
       applyFloatingTargetHitsForBall(
         sim,
         b,
-        Math.max(ballRadiusPx(sim), b.r)
+        Math.max(ballRadiusPx(sim), b.r),
+        cloudPackRef.current
       )
     }
 
@@ -3591,7 +3611,12 @@ export function GameCanvas() {
         sim.ballTrail.length = TRAIL_MAX
       }
 
-      applyFloatingTargetHitsForBall(sim, bOut, ballRadiusPx(sim))
+      applyFloatingTargetHitsForBall(
+        sim,
+        bOut,
+        ballRadiusPx(sim),
+        cloudPackRef.current
+      )
 
       let hitRing = -1
       let hitIdx = -1

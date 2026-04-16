@@ -5,6 +5,13 @@
  */
 import { circlesOverlap, type Ball } from './physics'
 import { CLOUD_TARGET_POINTS } from './scoreboard'
+import {
+  CLOUD_VARIANT_COUNT,
+  cloudSpriteHitRadiusPx,
+  drawCloudSpriteDrifting,
+  drawCloudSpritePopping,
+  type CloudTargetPack,
+} from './cloudSprites'
 
 // --- Tunables (see design doc) ---------------------------------------------
 
@@ -65,6 +72,8 @@ export type CloudTarget = {
   /** Phase offset for bob (rad). */
   bobPhase: number
   popRemain: number
+  /** Index into loaded `CloudTargetPack.variants` (0…5 for `cloud1`…`cloud6`). */
+  variantIndex: number
 }
 
 export type ParachutePayload = {
@@ -123,6 +132,7 @@ function spawnCloud(sim: FloatingCloudSimFields): void {
     vx,
     bobPhase: Math.random() * Math.PI * 2,
     popRemain: 0,
+    variantIndex: Math.floor(Math.random() * CLOUD_VARIANT_COUNT),
   })
 }
 
@@ -204,7 +214,8 @@ export function updateFloatingCloudLayer(
 export function applyFloatingTargetHitsForBall(
   sim: FloatingCloudSimFields,
   ball: Ball,
-  ballR: number
+  ballR: number,
+  cloudPack: CloudTargetPack | null
 ): void {
   const br = Math.max(ballR, ball.r)
   const s = Math.max(0.25, sim.sceneLayout.scale)
@@ -230,7 +241,15 @@ export function applyFloatingTargetHitsForBall(
   for (const c of sim.cloudTargets) {
     if (c.state !== 'drifting') continue
     const cy = cloudWorldY(sim.simTime, c)
-    if (circlesOverlap(ball.x, ball.y, br, c.x, cy, CLOUD_HIT_RADIUS * s)) {
+    const vn =
+      cloudPack != null && cloudPack.variants.length > 0
+        ? cloudPack.variants[c.variantIndex % cloudPack.variants.length]!
+        : null
+    const hitR =
+      vn != null
+        ? cloudSpriteHitRadiusPx(sim.h, vn.bounds, s)
+        : CLOUD_HIT_RADIUS * s
+    if (circlesOverlap(ball.x, ball.y, br, c.x, cy, hitR)) {
       c.state = 'popping'
       c.popRemain = CLOUD_POP_DURATION
       sim.score += CLOUD_TARGET_POINTS
@@ -252,32 +271,48 @@ export function applyFloatingTargetHitsForBall(
 
 export function drawFloatingCloudLayer(
   ctx: CanvasRenderingContext2D,
-  sim: FloatingCloudSimFields
+  sim: FloatingCloudSimFields,
+  cloudPack: CloudTargetPack | null
 ): void {
   const t = sim.simTime
   const s = Math.max(0.25, sim.sceneLayout.scale)
 
   for (const c of sim.cloudTargets) {
     const y = cloudWorldY(t, c)
-    ctx.save()
-    ctx.translate(c.x, y)
+    const vn =
+      cloudPack != null && cloudPack.variants.length > 0
+        ? cloudPack.variants[c.variantIndex % cloudPack.variants.length]!
+        : null
 
     if (c.state === 'popping') {
       const u =
         1 - Math.max(0, Math.min(CLOUD_POP_DURATION, c.popRemain)) / CLOUD_POP_DURATION
-      const a = 1 - u
-      ctx.globalAlpha = Math.max(0, a * 0.95)
-      ctx.strokeStyle = `rgba(255, 240, 220, ${0.45 + u * 0.4})`
-      ctx.lineWidth = 3 + u * 10
-      ctx.beginPath()
-      ctx.arc(0, 0, CLOUD_HIT_RADIUS * s + u * 55 * s, 0, Math.PI * 2)
-      ctx.stroke()
-      ctx.globalAlpha = 1
-      ctx.restore()
+      if (vn != null) {
+        drawCloudSpritePopping(ctx, c.x, y, vn, sim.h, s, u)
+      } else {
+        ctx.save()
+        ctx.translate(c.x, y)
+        const a = 1 - u
+        ctx.globalAlpha = Math.max(0, a * 0.95)
+        ctx.strokeStyle = `rgba(255, 240, 220, ${0.45 + u * 0.4})`
+        ctx.lineWidth = 3 + u * 10
+        ctx.beginPath()
+        ctx.arc(0, 0, CLOUD_HIT_RADIUS * s + u * 55 * s, 0, Math.PI * 2)
+        ctx.stroke()
+        ctx.globalAlpha = 1
+        ctx.restore()
+      }
       continue
     }
 
-    // Placeholder cloud: soft ellipse cluster
+    if (vn != null) {
+      drawCloudSpriteDrifting(ctx, c.x, y, vn, sim.h, s)
+      continue
+    }
+
+    ctx.save()
+    ctx.translate(c.x, y)
+    // Placeholder cloud: soft ellipse cluster (no WebP pack)
     const blob = (
       ox: number,
       oy: number,
@@ -294,7 +329,6 @@ export function drawFloatingCloudLayer(
     blob(8 * s, 0, 40 * s, 26 * s, 'rgba(220, 232, 245, 0.5)')
     blob(36 * s, 6 * s, 30 * s, 20 * s, 'rgba(210, 226, 240, 0.38)')
 
-    // Target marker
     ctx.strokeStyle = 'rgba(212, 48, 48, 0.85)'
     ctx.lineWidth = Math.max(1.25, 2.5 * s)
     ctx.beginPath()
