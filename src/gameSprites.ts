@@ -17,17 +17,45 @@ import {
  * Try lowercase then `.PNG` — deployment may be case-sensitive while macOS often is not.
  */
 const SPRITE_URL_CANDIDATES = {
-  /** Stadium: WebP only (regenerate with `npm run assets:webp-bg` if missing). */
-  bg: ['/assets/bg-stadium.webp', '/assets/bg-stadium.WEBP'],
+  /** Background: sky behind field (both WebP; design size 2048×1152). */
+  bgSky: [
+    '/assets/bg-sky.webp',
+    '/assets/bg-sky.WEBP',
+    '/assets/bg-SKY.webp',
+    '/assets/bg-SKY.WEBP',
+  ],
+  bgField: [
+    '/assets/bg-field.webp',
+    '/assets/bg-field.WEBP',
+    '/assets/bg-FIELD.webp',
+    '/assets/bg-FIELD.WEBP',
+  ],
   /** Sprites: WebP (`npm run assets:webp-sprites` to regenerate from PNGs). */
   statue: ['/assets/statue.webp', '/assets/statue.WEBP'],
   bat: ['/assets/bat.webp', '/assets/bat.WEBP'],
+  /** Pedestal in front of statue feet (optional). */
+  stand: [
+    '/assets/stand.webp',
+    '/assets/stand.WEBP',
+    '/assets/STAND.webp',
+    '/assets/STAND.WEBP',
+  ],
+  spacey: ['/assets/spacey.webp', '/assets/spacey.WEBP'],
+  /** Shown during post-hit celebration (optional; falls back to `spacey`). */
+  spacey2: ['/assets/spacey2.webp', '/assets/spacey2.WEBP'],
 } as const
 
 export type LoadedGameSprites = {
-  bg: HTMLImageElement
+  bgSky: HTMLImageElement
+  bgField: HTMLImageElement
   statue: HTMLImageElement
   bat: HTMLImageElement
+  /** `null` if missing — game still runs. */
+  stand: HTMLImageElement | null
+  /** Bonus target between sky + field; optional asset. */
+  spacey: HTMLImageElement | null
+  /** Hit-reaction art for Spacey celebration; optional. */
+  spacey2: HTMLImageElement | null
   statueOpaque: OpaqueBounds
   batOpaque: OpaqueBounds
 }
@@ -88,10 +116,6 @@ export type SpriteLayout = {
 const STATUE_ANCHOR_X_FR = 0.805
 const STATUE_ANCHOR_Y_FR = 0.789
 
-/** Visible statue height target — reduced vs full-PNG scale so figure matches stadium depth. */
-const STATUE_HEIGHT_FR = 0.21
-/** Applied after fit/height scale (e.g. 1.05 = 5% larger). */
-const STATUE_SCALE_MUL = 1.05
 /** Bat visible height vs statue visible height. */
 const BAT_DRAW_HEIGHT_FR_OF_STATUE = 0.88
 
@@ -135,22 +159,43 @@ async function loadImageDecoded(urls: readonly string[]): Promise<HTMLImageEleme
 }
 
 export async function loadGameSprites(): Promise<LoadedGameSprites> {
-  const [bg, statue, bat] = await Promise.all([
-    loadImageDecoded(SPRITE_URL_CANDIDATES.bg),
+  const [bgSky, bgField, statue, bat] = await Promise.all([
+    loadImageDecoded(SPRITE_URL_CANDIDATES.bgSky),
+    loadImageDecoded(SPRITE_URL_CANDIDATES.bgField),
     loadImageDecoded(SPRITE_URL_CANDIDATES.statue),
     loadImageDecoded(SPRITE_URL_CANDIDATES.bat),
   ])
   const statueOpaque = measureOpaqueBounds(statue)
   const batOpaque = measureOpaqueBounds(bat)
-  return { bg, statue, bat, statueOpaque, batOpaque }
-}
-
-/** width ÷ height of the stadium art; used to size the logical game board. */
-export function getStadiumImageAspectRatio(img: HTMLImageElement): number {
-  const iw = img.naturalWidth
-  const ih = img.naturalHeight
-  if (iw < 1 || ih < 1) return 16 / 9
-  return iw / ih
+  let stand: HTMLImageElement | null = null
+  try {
+    stand = await loadImageDecoded(SPRITE_URL_CANDIDATES.stand)
+  } catch {
+    /* optional */
+  }
+  let spacey: HTMLImageElement | null = null
+  let spacey2: HTMLImageElement | null = null
+  try {
+    spacey = await loadImageDecoded(SPRITE_URL_CANDIDATES.spacey)
+  } catch {
+    /* optional */
+  }
+  try {
+    spacey2 = await loadImageDecoded(SPRITE_URL_CANDIDATES.spacey2)
+  } catch {
+    /* optional */
+  }
+  return {
+    bgSky,
+    bgField,
+    statue,
+    bat,
+    stand,
+    spacey,
+    spacey2,
+    statueOpaque,
+    batOpaque,
+  }
 }
 
 /** Max statue scale so opaque rect + pivot stays inside canvas (hand at pivot). */
@@ -250,11 +295,14 @@ export function computeSpriteLayout(
   const statueHandSpringInVisX = statueHandSpringNatX - statueSrcX
   const statueHandSpringInVisY = statueHandSpringNatY - statueSrcY
 
-  const targetStatueVisH = h * STATUE_HEIGHT_FR
-  const sFromHeight =
-    sVisH > 0 ? targetStatueVisH / sVisH : targetStatueVisH / Math.max(1, sNatH)
   const pad = designPx(layout, STATUE_FIT_PAD_DESIGN)
-  const sFit = maxStatueScaleToFitCanvas(
+  /**
+   * `sFit` is the largest uniform scale that keeps the **opaque** statue crop + hand
+   * anchor inside the canvas; `maxStatueScaleToFitCanvas` already enforces the bottom
+   * edge at `h - pad` when that is the limiting direction. Using anything smaller than
+   * `sFit` (e.g. a separate height fraction) left a gap above the screen bottom.
+   */
+  const statueUniformScale = maxStatueScaleToFitCanvas(
     pivot,
     w,
     h,
@@ -264,19 +312,8 @@ export function computeSpriteLayout(
     statueHandSpringInVisX,
     statueHandSpringInVisY
   )
-  let statueUniformScale = Math.min(sFromHeight, sFit) * STATUE_SCALE_MUL
 
   const nudgeX = designPx(layout, STATUE_NUDGE_X_DESIGN)
-
-  /** Keep statue in frame when hand is locked to pivot (bottom may sit above field edge). */
-  const spanBelowHand = statueSrcH - statueHandSpringInVisY
-  if (spanBelowHand > 1e-3) {
-    const sMaxBottom =
-      (h - pad - pivot.y) / spanBelowHand
-    if (Number.isFinite(sMaxBottom) && sMaxBottom > 0) {
-      statueUniformScale = Math.min(statueUniformScale, sMaxBottom)
-    }
-  }
 
   const statueW = statueSrcW * statueUniformScale
   const statueH = statueSrcH * statueUniformScale
@@ -381,29 +418,61 @@ export function computeSpriteLayout(
 /** Logical playfield / letterbox void — keep in sync with `--stage-void` in `index.css`. */
 export const STAGE_VOID_HEX = '#060a12'
 
-/**
- * Full stadium layer: CSS `background-size: contain`, centered.
- * Entire image stays visible; when the canvas aspect matches the asset, it fills w×h.
- * Default compositing preserves PNG alpha over whatever is already drawn.
- */
-export function drawBackgroundImage(
+function drawBackgroundContain(
   ctx: CanvasRenderingContext2D,
-  img: HTMLImageElement,
+  im: HTMLImageElement,
   w: number,
   h: number
 ): void {
-  const iw = img.naturalWidth
-  const ih = img.naturalHeight
+  const iw = im.naturalWidth
+  const ih = im.naturalHeight
   if (iw < 1 || ih < 1) return
   const scale = Math.min(w / iw, h / ih)
   const dw = iw * scale
   const dh = ih * scale
   const dx = (w - dw) / 2
   const dy = (h - dh) / 2
-  /* Letterbox/pillarbox bands stay void-colored, not transparent (avoids white compositor flash). */
+  ctx.drawImage(im, dx, dy, dw, dh)
+}
+
+/**
+ * Sky only + void underfill. Call before mid-ground (e.g. Spacey), then
+ * {@link drawBackgroundFieldLayer}.
+ */
+export function drawBackgroundSkyLayer(
+  ctx: CanvasRenderingContext2D,
+  bgSky: HTMLImageElement,
+  w: number,
+  h: number
+): void {
   ctx.fillStyle = STAGE_VOID_HEX
   ctx.fillRect(0, 0, w, h)
-  ctx.drawImage(img, dx, dy, dw, dh)
+  drawBackgroundContain(ctx, bgSky, w, h)
+}
+
+/** Field layer on top of sky / Spacey. */
+export function drawBackgroundFieldLayer(
+  ctx: CanvasRenderingContext2D,
+  bgField: HTMLImageElement,
+  w: number,
+  h: number
+): void {
+  drawBackgroundContain(ctx, bgField, w, h)
+}
+
+/**
+ * Two background layers: sky (back) then field, each `contain`-scaled and centered
+ * like `background-size: contain`. Letterbox/pillarbox bands use `STAGE_VOID_HEX`.
+ */
+export function drawBackgroundLayers(
+  ctx: CanvasRenderingContext2D,
+  bgSky: HTMLImageElement,
+  bgField: HTMLImageElement,
+  w: number,
+  h: number
+): void {
+  drawBackgroundSkyLayer(ctx, bgSky, w, h)
+  drawBackgroundFieldLayer(ctx, bgField, w, h)
 }
 
 export function drawStatueSprite(
@@ -432,6 +501,48 @@ export function drawStatueSprite(
     layout.statueW,
     layout.statueH
   )
+}
+
+/** Design px: stand extends this far past the logical playfield bottom (then clipped). */
+const STAND_BLEED_PAST_BOTTOM_DESIGN = 14
+/** Design px: minimum drawn width for the stand art. */
+const STAND_MIN_DRAW_W_DESIGN = 520
+/** Width vs statue opaque draw width (tweak with art). */
+const STAND_WIDTH_VS_STATUE_W = 2.35
+/** Max fraction of canvas width the stand may span. */
+const STAND_MAX_WIDTH_FR = 0.78
+/** Scale applied to computed draw size (0.5 = half area vs prior tuning). */
+const STAND_DRAW_SIZE_MUL = 0.5
+/** Logical px nudge after centering (+X right, +Y down). */
+const STAND_OFFSET_X_PX = 30
+const STAND_OFFSET_Y_PX = 25
+
+/**
+ * Pedestal drawn **on top of** the statue sprite to hide the foot / ground seam.
+ * Bottom aligns to playfield bottom (`h`) plus a small downward bleed; placement is
+ * centered on the statue — tune constants after art review.
+ */
+export function drawStandBase(
+  ctx: CanvasRenderingContext2D,
+  stand: HTMLImageElement | null,
+  w: number,
+  h: number,
+  sl: Pick<SpriteLayout, 'statueX' | 'statueW'>,
+  layout: SceneLayout
+): void {
+  if (!stand || stand.naturalWidth < 1 || stand.naturalHeight < 1) return
+  const iw = stand.naturalWidth
+  const ih = stand.naturalHeight
+  const bleed = designPx(layout, STAND_BLEED_PAST_BOTTOM_DESIGN)
+  const minW = designPx(layout, STAND_MIN_DRAW_W_DESIGN)
+  const baseW = Math.min(w * STAND_MAX_WIDTH_FR, Math.max(sl.statueW * STAND_WIDTH_VS_STATUE_W, minW))
+  const drawW = baseW * STAND_DRAW_SIZE_MUL
+  const scale = drawW / iw
+  const drawH = ih * scale
+  const drawX =
+    sl.statueX + sl.statueW * 0.5 - drawW * 0.5 + STAND_OFFSET_X_PX
+  const drawY = h - drawH + bleed + STAND_OFFSET_Y_PX
+  ctx.drawImage(stand, 0, 0, iw, ih, drawX, drawY, drawW, drawH)
 }
 
 /**

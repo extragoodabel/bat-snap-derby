@@ -8,8 +8,6 @@ type MobileArcadeControlsProps = {
   onJoystickActiveChange: (active: boolean) => void
   /** Normalized stick offset from knob center, roughly −1…1 (clamped). */
   onJoystickOffset: (x: number, y: number) => void
-  /** Release-to-swing (same intent as mouse up after charging). */
-  onSwingPointerUp: () => void
   rapidFireEnabled: boolean
   onRapidFireChange: (enabled: boolean) => void
 }
@@ -20,7 +18,6 @@ export function MobileArcadeControls({
   variant,
   onJoystickActiveChange,
   onJoystickOffset,
-  onSwingPointerUp,
   rapidFireEnabled,
   onRapidFireChange,
 }: MobileArcadeControlsProps) {
@@ -28,16 +25,19 @@ export function MobileArcadeControls({
   const stickRef = useRef<HTMLDivElement>(null)
   const draggingRef = useRef(false)
 
-  const setStickPx = useCallback((dx: number, dy: number) => {
-    const el = stickRef.current
-    if (!el) return
-    const mx = Math.max(-KNOB_MAX_PX, Math.min(KNOB_MAX_PX, dx))
-    const my = Math.max(-KNOB_MAX_PX, Math.min(KNOB_MAX_PX, dy))
-    el.style.transform = `translate(calc(-50% + ${mx}px), calc(-50% + ${my}px))`
-    const nx = mx / KNOB_MAX_PX
-    const ny = my / KNOB_MAX_PX
-    onJoystickOffset(nx, ny)
-  }, [onJoystickOffset])
+  const setStickPx = useCallback(
+    (dx: number, dy: number) => {
+      const el = stickRef.current
+      if (!el) return
+      const mx = Math.max(-KNOB_MAX_PX, Math.min(KNOB_MAX_PX, dx))
+      const my = Math.max(-KNOB_MAX_PX, Math.min(KNOB_MAX_PX, dy))
+      el.style.transform = `translate(calc(-50% + ${mx}px), calc(-50% + ${my}px))`
+      const nx = mx / KNOB_MAX_PX
+      const ny = my / KNOB_MAX_PX
+      onJoystickOffset(nx, ny)
+    },
+    [onJoystickOffset]
+  )
 
   const resetStickVisual = useCallback(() => {
     const el = stickRef.current
@@ -56,7 +56,6 @@ export function MobileArcadeControls({
       const r = base.getBoundingClientRect()
       const cx = r.left + r.width / 2
       const cy = r.top + r.height / 2
-      /* Aim first so the sim reads a non-deadzone vector when charge begins. */
       setStickPx(e.clientX - cx, e.clientY - cy)
       onJoystickActiveChange(true)
     },
@@ -85,10 +84,6 @@ export function MobileArcadeControls({
       } catch {
         /* ignore */
       }
-      /**
-       * End charge / swing BEFORE zeroing stick offset. Otherwise onJoystickOffset(0,0) runs
-       * while still "charging" and clears pullback so release always looks like a whiff.
-       */
       onJoystickActiveChange(false)
       resetStickVisual()
     },
@@ -114,7 +109,10 @@ export function MobileArcadeControls({
             <div className="mobile-joystick__bezel" />
             <div ref={stickRef} className="mobile-joystick__knob" />
           </div>
-          <span className="mobile-joystick__caption">Aim</span>
+          <span className="mobile-joystick__caption">Swing bat</span>
+        </div>
+
+        <div className="mobile-arcade-controls__cluster mobile-arcade-controls__cluster--right">
           <label className="mobile-rapid">
             <input
               type="checkbox"
@@ -124,43 +122,11 @@ export function MobileArcadeControls({
             <span>Rapid demo swings</span>
           </label>
         </div>
-
-        <button
-          type="button"
-          className="mobile-swing-btn"
-          aria-label="Swing bat (while aiming)"
-          onPointerDown={(e) => {
-            e.preventDefault()
-            e.stopPropagation()
-            e.currentTarget.setPointerCapture(e.pointerId)
-          }}
-          onPointerUp={(e) => {
-            e.preventDefault()
-            e.stopPropagation()
-            try {
-              e.currentTarget.releasePointerCapture(e.pointerId)
-            } catch {
-              /* ignore */
-            }
-            onSwingPointerUp()
-          }}
-          onPointerCancel={(e) => {
-            try {
-              e.currentTarget.releasePointerCapture(e.pointerId)
-            } catch {
-              /* ignore */
-            }
-          }}
-        >
-          <span className="mobile-swing-btn__ring" />
-          <span className="mobile-swing-btn__label">SWING</span>
-          <span className="mobile-swing-btn__hint">or lift finger</span>
-        </button>
       </div>
 
       <p className="mobile-arcade-controls__howto">
         Drag the pad to pull the bat back, then <strong>lift your finger</strong> to swing
-        (same as mouse). Or keep aiming and tap <strong>SWING</strong>.
+        (same as mouse on desktop).
       </p>
     </div>
   )

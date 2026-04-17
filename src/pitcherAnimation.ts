@@ -15,9 +15,13 @@ export const PITCHER_ANCHOR_Y_FR = 0.64
 /** Target max opaque silhouette height vs canvas height (uniform scale from this). */
 export const PITCHER_HEIGHT_FR = 0.17
 
+/** Move pitcher, shadow, and mound spawn together (−X left, +X right). */
+export const PITCHER_HORIZONTAL_GROUP_NUDGE_X_PX = -3
 /** Nudge after anchor + scale (logical canvas px): +X right, +Y down. */
-const PITCHER_OFFSET_X_PX = -26
-const PITCHER_OFFSET_Y_PX = 169
+const PITCHER_OFFSET_X_PX = -26 + PITCHER_HORIZONTAL_GROUP_NUDGE_X_PX
+/** Move pitcher, shadow, and WebP release spawn together (+Y down, −Y up). */
+export const PITCHER_VERTICAL_GROUP_NUDGE_Y_PX = -48
+const PITCHER_OFFSET_Y_PX = 169 + PITCHER_VERTICAL_GROUP_NUDGE_Y_PX
 
 /**
  * 18-step loop (0-based texture indices → mariano1…5). Long holds on M1 / M5 so the loop
@@ -187,6 +191,74 @@ export function getPitcherReleaseSpawnScreen(
 
 let warnedMissingPitcherAssets = false
 
+/** Shadow ellipse center offset from cleat anchor (+X right), screen px. */
+const PITCHER_SHADOW_OFFSET_X_PX = -4
+/** Nudge shadow vertically vs cleat (+Y down, −Y up), screen px. */
+const PITCHER_SHADOW_OFFSET_Y_PX = -1
+
+/**
+ * mariano1 (texture index 0): extend shadow footprint 30% of half-width leftward only
+ * (right edge unchanged). Achieved with rx×1.15 and center shifted −0.15×rx.
+ */
+const MARIANO1_SHADOW_LEFT_WIDEN_FR = 0.3
+
+/**
+ * Shadow width vs the old single ellipse: mariano1 (index 0) = 1/8, mariano4 (full extension) = 1/4.
+ * Frames in between ramp linearly; mariano5 tapers back toward the narrow end.
+ */
+function pitcherGroundShadowWidthMul(frameIndex: number): number {
+  const mariano1 = 1 / 8
+  const fullExt = 1 / 4
+  if (frameIndex <= 3) {
+    return mariano1 + ((fullExt - mariano1) * frameIndex) / 3
+  }
+  return fullExt + (mariano1 - fullExt) * 0.55
+}
+
+/** Soft ellipse under the cleat anchor — drawn before the figure so it reads as ground contact. */
+function drawPitcherGroundShadow(
+  ctx: CanvasRenderingContext2D,
+  footX: number,
+  footY: number,
+  radiusX: number,
+  radiusY: number,
+  widthMul: number,
+  frameIndex: number
+): void {
+  let sx = footX + PITCHER_SHADOW_OFFSET_X_PX
+  let rx = Math.max(6, radiusX * widthMul)
+  const ry = Math.max(3.5, radiusY * Math.sqrt(widthMul))
+  if (frameIndex === 0) {
+    const rx0 = rx
+    rx = rx0 * (1 + 0.5 * MARIANO1_SHADOW_LEFT_WIDEN_FR)
+    sx -= 0.5 * MARIANO1_SHADOW_LEFT_WIDEN_FR * rx0
+    /* +4px wider to the left only (right edge fixed): two × (center −1, +rx 1). */
+    sx -= 2
+    rx += 2
+    /* +2px more on the left only (right edge still fixed). */
+    sx -= 1
+    rx += 1
+    /* Translate whole shadow 2px left (both edges). */
+    sx -= 2
+  }
+  if (frameIndex === 4) {
+    /* +25px on the right only: +12.5 center, +12.5 half-axis (+5 vs prior +20). */
+    sx += 12.5
+    rx += 12.5
+  }
+  const sy = footY + PITCHER_SHADOW_OFFSET_Y_PX
+  ctx.save()
+  ctx.beginPath()
+  ctx.ellipse(sx, sy + 4, rx * 1.12, ry * 1.35, 0, 0, Math.PI * 2)
+  ctx.fillStyle = 'rgba(10, 18, 32, 0.12)'
+  ctx.fill()
+  ctx.beginPath()
+  ctx.ellipse(sx, sy + 2, rx, ry, 0, 0, Math.PI * 2)
+  ctx.fillStyle = 'rgba(8, 16, 30, 0.22)'
+  ctx.fill()
+  ctx.restore()
+}
+
 /**
  * Silhouette mound pitcher when `mariano*.webp` are missing — same anchor + loop timing
  * so gameplay stays readable until real art is added (`npm run assets:webp-pitcher`).
@@ -207,8 +279,20 @@ function drawSyntheticPitcher(
   const armPhase = fi / 4
   const armAngle = -1.15 + armPhase * 0.95
 
+  const footX = ax + PITCHER_OFFSET_X_PX
+  const footY = ay + PITCHER_OFFSET_Y_PX
+  drawPitcherGroundShadow(
+    ctx,
+    footX,
+    footY,
+    Math.max(22, uh * 0.48),
+    Math.max(4, uh * 0.05),
+    pitcherGroundShadowWidthMul(fi),
+    fi
+  )
+
   ctx.save()
-  ctx.translate(ax + PITCHER_OFFSET_X_PX, ay + PITCHER_OFFSET_Y_PX)
+  ctx.translate(footX, footY)
 
   ctx.fillStyle = 'rgba(16, 36, 58, 0.92)'
   ctx.strokeStyle = 'rgba(210, 225, 240, 0.42)'
@@ -289,6 +373,19 @@ export function drawPitcher(
   const ay = h * PITCHER_ANCHOR_Y_FR
   const dx = ax - pack.footNatX * scale + PITCHER_OFFSET_X_PX
   const dy = ay - pack.footNatY * scale + PITCHER_OFFSET_Y_PX
+
+  const footX = ax + PITCHER_OFFSET_X_PX
+  const footY = ay + PITCHER_OFFSET_Y_PX
+  const swMul = pitcherGroundShadowWidthMul(fi)
+  drawPitcherGroundShadow(
+    ctx,
+    footX,
+    footY,
+    Math.max(28, dw * 0.34),
+    Math.max(5, h * 0.0115),
+    swMul,
+    fi
+  )
 
   ctx.drawImage(img, 0, 0, nw, nh, dx, dy, dw, dh)
 }

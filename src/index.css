@@ -189,7 +189,18 @@
   pointer-events: none;
 }
 
-.game-canvas-shell--mobile:not(.game-canvas-shell--portrait) .mobile-arcade-controls > * {
+/*
+ * Let touches reach the canvas except on real controls. Previously `__main` had
+ * `pointer-events: auto` (via `> *`), so the full-width bottom bar swallowed all taps
+ * on the field — sim / draw never “saw” play, so pitcher & pitches looked broken.
+ */
+.game-canvas-shell--mobile:not(.game-canvas-shell--portrait)
+  .mobile-arcade-controls__main {
+  pointer-events: none;
+}
+
+.game-canvas-shell--mobile:not(.game-canvas-shell--portrait)
+  .mobile-arcade-controls__cluster {
   pointer-events: auto;
 }
 
@@ -265,6 +276,11 @@
   align-self: flex-end;
 }
 
+.mobile-arcade-controls__cluster--right {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
 .mobile-joystick {
   position: relative;
   width: 96px;
@@ -319,7 +335,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 4px;
+  margin-top: 0;
   padding: 8px 6px;
   min-height: 44px;
   box-sizing: border-box;
@@ -336,64 +352,6 @@
   width: 20px;
   height: 20px;
   flex-shrink: 0;
-}
-
-.mobile-swing-btn {
-  position: relative;
-  width: 92px;
-  height: 92px;
-  border-radius: 50%;
-  border: none;
-  padding: 0;
-  cursor: pointer;
-  touch-action: none;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  background: radial-gradient(
-    circle at 35% 28%,
-    #d50032 0%,
-    #9a0024 52%,
-    #5c0016 100%
-  );
-  box-shadow: 0 6px 0 rgba(0, 0, 0, 0.35), 0 8px 18px rgba(0, 0, 0, 0.4),
-    inset 0 2px 0 rgba(255, 255, 255, 0.22);
-  color: #fff8f0;
-}
-
-.mobile-swing-btn:active {
-  transform: translateY(3px);
-  box-shadow: 0 3px 0 rgba(0, 0, 0, 0.32), 0 4px 12px rgba(0, 0, 0, 0.35),
-    inset 0 2px 0 rgba(255, 255, 255, 0.18);
-}
-
-.mobile-swing-btn__ring {
-  position: absolute;
-  inset: 10px;
-  border-radius: 50%;
-  border: 3px solid rgba(255, 255, 255, 0.28);
-  pointer-events: none;
-}
-
-.mobile-swing-btn__label {
-  position: relative;
-  z-index: 1;
-  font: 800 14px/1 'Oswald', system-ui, sans-serif;
-  letter-spacing: 0.12em;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
-}
-
-.mobile-swing-btn__hint {
-  position: relative;
-  z-index: 1;
-  margin-top: 2px;
-  font: 600 8px/1.1 system-ui, sans-serif;
-  letter-spacing: 0.06em;
-  color: rgba(255, 248, 240, 0.88);
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
-  max-width: 72px;
-  text-align: center;
 }
 
 @keyframes rotate-play-hint-spin {
@@ -483,8 +441,10 @@ body {
   min-width: 0;
   min-height: 0;
   display: flex;
-  justify-content: center;
-  align-items: flex-start;
+  flex-direction: column;
+  /* Do not use `stretch` here: cabinet must stay `fit-content` so frame padding matches
+     `--playfield-frame-total-*` / GameCanvas resize (see .game-cabinet). */
+  align-items: center;
 }
 
 /* Max box for canvas math: entire game column (minus where frame will wrap) */
@@ -496,13 +456,19 @@ body {
   z-index: 0;
 }
 
+/* Collapsed: hugs the ▶ Dev control only; expanded: room for the panel (see App.tsx). */
 .game-dev-aside {
   flex: 0 0 auto;
-  width: min(300px, 42vw);
+  width: max-content;
+  max-width: 100%;
   min-width: 0;
   max-height: 100%;
   overflow: auto;
   padding-top: 2px;
+}
+
+.game-dev-aside--open {
+  width: min(280px, 38vw);
 }
 
 .game-launcher-hud-pre {
@@ -519,7 +485,7 @@ body {
   box-sizing: border-box;
 }
 
-/* Framed cabinet: thick intentional trim */
+/* Framed cabinet: hugs logical canvas; padding sums must match --playfield-frame-total-* */
 .game-cabinet {
   position: relative;
   z-index: 1;

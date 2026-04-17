@@ -24,13 +24,14 @@ import { useGameLoop } from './useGameLoop'
 import { MobileArcadeControls } from './MobileArcadeControls'
 import { drawSpring } from './drawSpring'
 import {
-  drawBackgroundImage,
+  drawBackgroundFieldLayer,
+  drawBackgroundSkyLayer,
   drawBatSprite,
   drawSpriteDebugOverlay,
+  drawStandBase,
   drawStatueSprite,
   loadGameSprites,
   computeSpriteLayout,
-  getStadiumImageAspectRatio,
   STAGE_VOID_HEX,
   type LoadedGameSprites,
   type SpriteLayout,
@@ -39,6 +40,8 @@ import {
   drawPitcher,
   getPitcherReleaseSpawnScreen,
   loadPitcherPack,
+  PITCHER_HORIZONTAL_GROUP_NUDGE_X_PX,
+  PITCHER_VERTICAL_GROUP_NUDGE_Y_PX,
   timeToNextPitcherReleasePhase,
   type PitcherPack,
 } from './pitcherAnimation'
@@ -63,9 +66,23 @@ import {
   type CloudTarget,
   type ParachutePayload,
 } from './cloudTargets'
-import { loadCloudTargetPack, type CloudTargetPack } from './cloudSprites'
+import {
+  applySpaceyBallHit,
+  drawAllPointsDoubleAnnouncement,
+  drawSpacey,
+  drawSpaceyCelebrationOverlays,
+  initSpacey,
+  updateSpacey,
+  type SpaceyPhase,
+} from './spacey'
+import {
+  CLOUD_SPRITE_MOBILE_SCALE_MUL,
+  loadCloudTargetPack,
+  type CloudTargetPack,
+} from './cloudSprites'
 import {
   BALL_R_DESIGN,
+  BOARD_DESIGN_ASPECT,
   computeSceneLayout,
   CONTACT_ZONE_R_DESIGN,
   designPx,
@@ -84,8 +101,8 @@ import {
   type SceneLayout,
 } from './sceneLayout'
 
-/** Board aspect before bg-stadium loads (then replaced by the image’s width÷height). */
-const FALLBACK_BOARD_ASPECT = 16 / 9
+/** Board aspect matches design field `2048×1152` until sprites load (then unchanged). */
+const FALLBACK_BOARD_ASPECT = BOARD_DESIGN_ASPECT
 
 /** Logical canvas must leave room for cabinet chrome; totals must match `index.css` :root. */
 function readPlayfieldFrameBudgetPx(): { x: number; y: number } {
@@ -181,10 +198,10 @@ const PULLBACK_MAX_RAD = Math.max(
 
 const OMEGA_BASE = 5.75
 const OMEGA_SCALE = 8.6
-/** `omega *= exp(-this * dt)` during swing — lower keeps |ω| up longer → faster sweep through launch. */
-const SWING_DAMPING = 1.95
+/** `omega *= exp(-this * dt)` during swing — lower keeps |ω| up longer → faster sweep through contact. */
+const SWING_DAMPING = 1.62
 /** Extra whip on release (Ichiro-style forward crack). */
-const SWING_WHIP_MULT = 1.52
+const SWING_WHIP_MULT = 1.64
 /** Lighter damping while carrying through full recovery loop. */
 const RECOVERY_DAMPING = 0.86
 /** Brief boost to keep loop snappy after ball leaves. */
@@ -545,6 +562,11 @@ type Sim = {
    * skip one outgoing `integrateBall` so we don’t double-integrate.
    */
   skipOutgoingPhysicsOnce: boolean
+  /**
+   * One fair bat→incoming pitch per release swing; blocks a second queued pitch
+   * during the same swing/recovery (bat can sweep the zone twice).
+   */
+  swingFairIncomingConsumed: boolean
   /** Active ball hit tier (copied at spawn). */
   ballShotTier: PowerTier
   /** Perfect full send: first hit pierces (ball survives once). */
@@ -562,6 +584,22 @@ type Sim = {
   timedMode: boolean
   /** Reserved for combo / bonus display on the scoreboard. */
   comboMultiplier: number
+  /** Applied to disc + cloud score deltas (Spacey all-points double). */
+  scorePointMultiplier: number
+  spaceyWaitRemain: number
+  spaceyPhase: SpaceyPhase
+  spaceyPhaseT: number
+  spaceyEmerge01: number
+  spaceyHitThisCycle: boolean
+  spaceyAnchorXFr: number
+  spaceyAnchorYFr: number
+  spaceyNudgeX: number
+  spaceySpawnIsLeft: boolean
+  spaceyPeekRad: number
+  spaceyCelebrateRemain: number
+  spaceySpawnCycle: number
+  allPointsDoubleRemainSec: number
+  allPointsDoubleAnnounceRemainSec: number
   releaseFlashRemain: number
   releaseFlashTier: PowerTier | null
   shakeRemain: number
@@ -617,7 +655,7 @@ type Sim = {
   cloudSpawnCountdown: number
   nextFloatingTargetId: number
 
-  /** Single responsive scale vs 1600×900 design reference. */
+  /** Single responsive scale vs 2048×1152 design reference. */
   sceneLayout: SceneLayout
 }
 
@@ -909,6 +947,11 @@ function drawRingRowTargets(
     const active = slot.isActive
     const pal = RING_TARGET_PALETTE[ringIdx] ?? RING_TARGET_PALETTE[0]
 
+    /* Lower-half pegs are occluded in play — skip grey placeholder discs (still show in dev). */
+    if (!upper && !revealLabels) {
+      continue
+    }
+
     ctx.beginPath()
     ctx.arc(pt.x, pt.y, targetR, 0, Math.PI * 2)
     if (!upper) {
@@ -924,7 +967,6 @@ function drawRingRowTargets(
       ctx.fill()
       ctx.stroke()
     } else {
-      ctx.fillStyle = 'rgba(90, 95, 110, 0.22)'
       ctx.strokeStyle = 'rgba(160, 140, 100, 0.75)'
       ctx.lineWidth = 2.5
       ctx.stroke()
@@ -1033,6 +1075,7 @@ function createSim(w: number, h: number): Sim {
     powerTierRelease: 'normal',
     ballShotTier: 'normal',
     skipOutgoingPhysicsOnce: false,
+    swingFairIncomingConsumed: false,
     ballPierceArmed: false,
     ballNextHitMinRing: null,
     ballExitBand: 'standard',
@@ -1041,6 +1084,21 @@ function createSim(w: number, h: number): Sim {
     timedMode: SCOREBOARD_TIMED_MODE,
     timerRemainingSec: SCOREBOARD_TIMED_MODE ? SCOREBOARD_TIME_LIMIT_SEC : null,
     comboMultiplier: 1,
+    scorePointMultiplier: 1,
+    spaceyWaitRemain: 0,
+    spaceyPhase: 'wait',
+    spaceyPhaseT: 0,
+    spaceyEmerge01: 0,
+    spaceyHitThisCycle: false,
+    spaceyAnchorXFr: 0.54,
+    spaceyAnchorYFr: 0.42,
+    spaceyNudgeX: 50,
+    spaceySpawnIsLeft: false,
+    spaceyPeekRad: 0,
+    spaceyCelebrateRemain: 0,
+    spaceySpawnCycle: 0,
+    allPointsDoubleRemainSec: 0,
+    allPointsDoubleAnnounceRemainSec: 0,
     releaseFlashRemain: 0,
     releaseFlashTier: null,
     shakeRemain: 0,
@@ -1086,6 +1144,7 @@ function createSim(w: number, h: number): Sim {
     nextFloatingTargetId: 1,
   }
   initFloatingCloudLayer(sim)
+  initSpacey(sim)
   return sim
 }
 
@@ -1284,11 +1343,12 @@ function pitchPlannedContactPoint(sim: Sim, pitchContactFracT: number): Vec2 {
 /** World position where the pitch spawns (mound). */
 function pitchMoundScreenPoint(sim: Sim, pitchReleaseDyPx: number): Vec2 {
   return {
-    x: sim.w * PITCH_MOUND_X_FR,
+    x: sim.w * PITCH_MOUND_X_FR + PITCHER_HORIZONTAL_GROUP_NUDGE_X_PX,
     y:
       sim.h * PITCH_MOUND_Y_FR +
       pitchReleaseDyPx * 0.35 -
-      designPx(sim.sceneLayout, PITCH_MOUND_NUDGE_UP_DESIGN),
+      designPx(sim.sceneLayout, PITCH_MOUND_NUDGE_UP_DESIGN) +
+      PITCHER_VERTICAL_GROUP_NUDGE_Y_PX,
   }
 }
 
@@ -2044,7 +2104,8 @@ function chainDestroyNeighbors(
     if (angularDiff(aHit, aj) <= CHAIN_ANGLE_RAD) {
       ring.targetSlots[j].wasTriggered = true
       ring.targetSlots[j].isActive = false
-      sim.score += targetPointsForRing(ringIdx)
+      const mul = Math.max(1, sim.scorePointMultiplier)
+      sim.score += Math.round(targetPointsForRing(ringIdx) * mul)
     }
   }
 }
@@ -2195,6 +2256,7 @@ function drawSceneLayoutDebug(ctx: CanvasRenderingContext2D, sim: Sim): void {
     timedMode: sim.timedMode,
     timerRemainingSec: sim.timerRemainingSec,
     comboMultiplier: sim.comboMultiplier,
+    allPointsDoubleRemainSec: sim.allPointsDoubleRemainSec,
   }, s)
   ctx.strokeStyle = 'rgba(120, 210, 255, 0.85)'
   ctx.lineWidth = Math.max(1, 1.5 * s)
@@ -2687,7 +2749,16 @@ function trySpawnIncomingPitch(
 
 let lastSpriteThetaLogMs = 0
 
-export function GameCanvas() {
+export type GameCanvasProps = {
+  /** Desktop only: when false, aside stays narrow so the playfield uses most of the row. */
+  devToolsOpen: boolean
+  onDevToolsOpenChange: (open: boolean) => void
+}
+
+export function GameCanvas({
+  devToolsOpen,
+  onDevToolsOpenChange,
+}: GameCanvasProps) {
   const layout = useGameLayout()
   const layoutRef = useRef(layout)
   layoutRef.current = layout
@@ -2708,7 +2779,6 @@ export function GameCanvas() {
     showSceneLayoutDebug: false,
   })
 
-  const [devToolsOpen, setDevToolsOpen] = useState(false)
   const [clipDiscLowerHalf, setClipDiscLowerHalf] = useState(true)
   const [revealHiddenLayers, setRevealHiddenLayers] = useState(false)
   const [showLauncherDebugHud, setShowLauncherDebugHud] = useState(false)
@@ -2754,6 +2824,7 @@ export function GameCanvas() {
     }
 
     const aspect = boardAspectRef.current
+    /** Largest 16:9 (`aspect`) that fits inside `vw×vh` — design space stays 2048×1152-relative via `sceneLayout.scale`. */
     let w: number
     let h: number
     if (vw / vh > aspect) {
@@ -2771,6 +2842,10 @@ export function GameCanvas() {
     canvas.width = Math.round(w * dpr)
     canvas.height = Math.round(h * dpr)
 
+    /* Wrapper exactly matches logical playfield so cabinet chrome tracks canvas size. */
+    container.style.display = 'block'
+    container.style.position = 'relative'
+    container.style.flexShrink = '0'
     container.style.width = `${w}px`
     container.style.height = `${h}px`
 
@@ -2824,7 +2899,7 @@ export function GameCanvas() {
       .then((loaded) => {
         if (cancelled) return
         spritesRef.current = loaded
-        boardAspectRef.current = getStadiumImageAspectRatio(loaded.bg)
+        boardAspectRef.current = BOARD_DESIGN_ASPECT
         resize()
         setSpritesRevision((n) => n + 1)
       })
@@ -2858,6 +2933,11 @@ export function GameCanvas() {
   useEffect(() => {
     resize()
   }, [resize, layout.kind])
+
+  /** Dev aside width toggles; re-fit canvas immediately (ResizeObserver may lag one frame). */
+  useEffect(() => {
+    resize()
+  }, [resize, devToolsOpen])
 
   useLayoutEffect(() => {
     if (layout.isMobile) {
@@ -2920,8 +3000,12 @@ export function GameCanvas() {
     }
 
     const sprites = spritesRef.current
-    if (sprites?.bg) {
-      drawBackgroundImage(ctx, sprites.bg, w, h)
+    if (sprites?.bgSky && sprites?.bgField) {
+      drawBackgroundSkyLayer(ctx, sprites.bgSky, w, h)
+      /* Sky → Spacey → field: bonus sits behind the field layer (both sides). */
+      drawSpacey(ctx, sim, sprites.spacey, sprites.spacey2)
+      drawSpaceyCelebrationOverlays(ctx, sim)
+      drawBackgroundFieldLayer(ctx, sprites.bgField, w, h)
     }
 
     drawReleaseFlash(ctx, sim)
@@ -3002,7 +3086,10 @@ export function GameCanvas() {
 
     drawPitcher(ctx, w, h, sim.simTime, pitcherPackRef.current, 'idleLoop')
 
-    drawFloatingCloudLayer(ctx, sim, cloudPackRef.current)
+    const cloudScreenMul = layoutRef.current.isMobile
+      ? CLOUD_SPRITE_MOBILE_SCALE_MUL
+      : 1
+    drawFloatingCloudLayer(ctx, sim, cloudPackRef.current, cloudScreenMul)
 
     if (sim.spriteLayout) {
       drawAtmosphericBackGlow(
@@ -3073,6 +3160,9 @@ export function GameCanvas() {
     }
     if (sprites?.statue && sim.spriteLayout) {
       drawStatueSprite(ctx, sprites.statue, sim.spriteLayout)
+    }
+    if (sprites?.stand && sim.spriteLayout) {
+      drawStandBase(ctx, sprites.stand, w, h, sim.spriteLayout, sim.sceneLayout)
     }
 
     if (sim.phase === 'charging') {
@@ -3196,9 +3286,18 @@ export function GameCanvas() {
         timedMode: sim.timedMode,
         timerRemainingSec: sim.timerRemainingSec,
         comboMultiplier: sim.comboMultiplier,
+        allPointsDoubleRemainSec: sim.allPointsDoubleRemainSec,
       },
       sim.sceneLayout.scale,
       scoreboardScaleMul
+    )
+
+    drawAllPointsDoubleAnnouncement(
+      ctx,
+      w,
+      h,
+      sim.allPointsDoubleAnnounceRemainSec,
+      sim.sceneLayout.scale * scoreboardScaleMul
     )
 
     if (dev.showSceneLayoutDebug) {
@@ -3274,6 +3373,7 @@ export function GameCanvas() {
 
     sim.simTime += dt
     updateFloatingCloudLayer(sim, dt)
+    updateSpacey(sim, dt)
 
     if (
       sim.timedMode &&
@@ -3361,6 +3461,7 @@ export function GameCanvas() {
           sim.chargeElapsed = 0
           sim.pCurrent = 0
           sim.pRelease = 0
+          sim.swingFairIncomingConsumed = false
         }
       } else {
         sim.theta += sim.omega * dt
@@ -3449,7 +3550,8 @@ export function GameCanvas() {
         sim,
         b,
         Math.max(ballRadiusPx(sim), b.r),
-        cloudPackRef.current
+        cloudPackRef.current,
+        layoutRef.current.isMobile ? CLOUD_SPRITE_MOBILE_SCALE_MUL : 1
       )
     }
 
@@ -3490,7 +3592,7 @@ export function GameCanvas() {
         sim.pRelease > POWER_DEADZONE &&
         inc.idealContactTime > 0
 
-      if (!inc.pitchContactResolved) {
+      if (!inc.pitchContactResolved && !sim.swingFairIncomingConsumed) {
         if (inZone && swingOk && inSwingArc) {
           inc.pitchContactResolved = true
           const err = sim.simTime - inc.idealContactTime
@@ -3520,6 +3622,7 @@ export function GameCanvas() {
           sim.debugLaunchDir = { x: out.vx / spn, y: out.vy / spn }
 
           if (out.bucket !== 'miss') {
+            sim.swingFairIncomingConsumed = true
             b.vx = out.vx
             b.vy = out.vy
             b.r = ballRadiusPx(sim)
@@ -3615,7 +3718,15 @@ export function GameCanvas() {
         sim,
         bOut,
         ballRadiusPx(sim),
-        cloudPackRef.current
+        cloudPackRef.current,
+        layoutRef.current.isMobile ? CLOUD_SPRITE_MOBILE_SCALE_MUL : 1
+      )
+      applySpaceyBallHit(
+        sim,
+        bOut,
+        ballRadiusPx(sim),
+        spritesRef.current?.spacey ?? null,
+        sim.ballTrail.length >= 2 ? sim.ballTrail[1]! : null
       )
 
       let hitRing = -1
@@ -3634,7 +3745,8 @@ export function GameCanvas() {
 
       if (hitRing >= 0 && hitIdx >= 0) {
         const tier = sim.ballShotTier
-        sim.score += targetPointsForRing(hitRing)
+        const mul = Math.max(1, sim.scorePointMultiplier)
+        sim.score += Math.round(targetPointsForRing(hitRing) * mul)
 
         const struck = sim.rings[hitRing].targetSlots[hitIdx]
         struck.wasTriggered = true
@@ -3811,9 +3923,11 @@ export function GameCanvas() {
       sim.releaseFlashTier = null
       sim.releaseFlashRemain = 0
       sim.pitchArmElapsed = 0
+      sim.swingFairIncomingConsumed = false
     } else {
       sim.powerTierRelease = classifyPowerTier(sim.pRelease)
       sim.phase = 'swing'
+      sim.swingFairIncomingConsumed = false
       sim.springSwingT0 = sim.simTime
       sim.theta = sim.thetaRelease
       sim.omega =
@@ -3869,14 +3983,6 @@ export function GameCanvas() {
     [draw]
   )
 
-  const onSwingPointerUp = useCallback(() => {
-    const sim = simRef.current
-    if (!sim || !layoutRef.current.isMobile) return
-    if (sim.phase !== 'charging' || !sim.mobileChargeViaControls) return
-    endCharge(sim)
-    draw()
-  }, [draw])
-
   const onPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (layoutRef.current.isMobile) return
     const sim = simRef.current
@@ -3914,6 +4020,7 @@ export function GameCanvas() {
       sim.releaseFlashTier = null
       sim.releaseFlashRemain = 0
       sim.pitchArmElapsed = 0
+      sim.swingFairIncomingConsumed = false
     }
     sim.pointer = null
     const c = canvasRef.current
@@ -3935,7 +4042,7 @@ export function GameCanvas() {
     >
       <button
         type="button"
-        onClick={() => setDevToolsOpen((o) => !o)}
+        onClick={() => onDevToolsOpenChange(!devToolsOpen)}
         style={{
           cursor: 'pointer',
           padding: '3px 8px',
@@ -4155,7 +4262,6 @@ export function GameCanvas() {
             variant={layout.isPortraitMobile ? 'portrait' : 'landscape'}
             onJoystickActiveChange={onJoystickActiveChange}
             onJoystickOffset={onJoystickOffset}
-            onSwingPointerUp={onSwingPointerUp}
             rapidFireEnabled={mobileRapidFire}
             onRapidFireChange={setMobileRapidFire}
           />

@@ -1,10 +1,13 @@
 /**
- * Single responsive scale: logical canvas (w×h) vs reference design (1600×900).
+ * Single responsive scale: logical canvas (w×h) vs reference design (2048×1152).
  * Pixel-like tuning constants should be expressed in design space and converted with `designPx`.
  */
 
-export const DESIGN_REF_W = 1600
-export const DESIGN_REF_H = 900
+export const DESIGN_REF_W = 2048
+export const DESIGN_REF_H = 1152
+
+/** Logical field aspect — matches layered `bg-sky` / `bg-field` art. */
+export const BOARD_DESIGN_ASPECT = DESIGN_REF_W / DESIGN_REF_H
 
 export type SceneLayout = {
   w: number
@@ -21,7 +24,7 @@ export function computeSceneLayout(w: number, h: number): SceneLayout {
   }
 }
 
-/** Convert a distance tuned at 1600×900 into current logical pixels. */
+/** Convert a distance tuned at 2048×1152 into current logical pixels. */
 export function designPx(layout: SceneLayout, designPixels: number): number {
   return designPixels * layout.scale
 }

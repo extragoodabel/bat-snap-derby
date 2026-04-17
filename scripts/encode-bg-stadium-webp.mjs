@@ -1,5 +1,6 @@
 /**
- * Encode stadium background to WebP for the game (still loaded as /assets/bg-stadium.webp).
+ * Legacy: encoded single stadium bg. The game now loads `/assets/bg-sky.webp` +
+ * `/assets/bg-field.webp` (2048×1152). Keep this script for one-off encodes if needed.
  *
  * Default input (preferred): public/assets/big-stadium.png
  * Fallback:              public/assets/bg-stadium.png

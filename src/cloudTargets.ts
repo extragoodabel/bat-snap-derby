@@ -1,6 +1,7 @@
 /**
- * Floating cloud bonus targets (placeholder art) + parachute hot dogs.
- * Hot dogs only spawn when a cloud is hit; no separate “random sky” spawner.
+ * Floating cloud bonus targets (placeholder art when no WebP pack) +
+ * parachute drops (`hotdog.webp` composite when loaded).
+ * Drops only spawn when a cloud is hit and the hotdog asset is available.
  * Independent from spinning disc targets.
  */
 import { circlesOverlap, type Ball } from './physics'
@@ -10,6 +11,8 @@ import {
   cloudSpriteHitRadiusPx,
   drawCloudSpriteDrifting,
   drawCloudSpritePopping,
+  drawParachutePayloadSprite,
+  hotdogSpriteHitRadiusPx,
   type CloudTargetPack,
 } from './cloudSprites'
 
@@ -52,9 +55,6 @@ const MAX_PARACHUTES = 14
 
 /** Hit radius for the bullseye on the cloud (logical px). */
 export const CLOUD_HIT_RADIUS = 24
-/** Payload (hot dog) hit radius. */
-export const PARACHUTE_PAYLOAD_HIT_R = 14
-
 const CLOUD_POP_DURATION = 0.2
 const PARACHUTE_LIFETIME_SEC = 48
 
@@ -92,6 +92,8 @@ export type FloatingCloudSimFields = {
   score: number
   /** Same `scale` as `SceneLayout` — scales hit radii / placeholder art with the board. */
   sceneLayout: { scale: number }
+  /** Spacey / other bonuses: applied to {@link CLOUD_TARGET_POINTS} adds. */
+  scorePointMultiplier: number
   cloudTargets: CloudTarget[]
   parachutePayloads: ParachutePayload[]
   cloudSpawnCountdown: number
@@ -215,26 +217,25 @@ export function applyFloatingTargetHitsForBall(
   sim: FloatingCloudSimFields,
   ball: Ball,
   ballR: number,
-  cloudPack: CloudTargetPack | null
+  cloudPack: CloudTargetPack | null,
+  cloudScreenScaleMul = 1
 ): void {
   const br = Math.max(ballR, ball.r)
   const s = Math.max(0.25, sim.sceneLayout.scale)
 
+  const hdHit = cloudPack?.hotdog ?? null
+  const payloadHitR =
+    hdHit != null
+      ? hotdogSpriteHitRadiusPx(sim.h, hdHit.bounds, s, cloudScreenScaleMul)
+      : 0
+
   for (let j = sim.parachutePayloads.length - 1; j >= 0; j--) {
     const p = sim.parachutePayloads[j]
     if (!p.alive) continue
-    if (
-      circlesOverlap(
-        ball.x,
-        ball.y,
-        br,
-        p.x,
-        p.y,
-        PARACHUTE_PAYLOAD_HIT_R * s
-      )
-    ) {
+    if (payloadHitR > 0 && circlesOverlap(ball.x, ball.y, br, p.x, p.y, payloadHitR)) {
       p.alive = false
-      sim.score += CLOUD_TARGET_POINTS
+      const mul = Math.max(1, sim.scorePointMultiplier)
+      sim.score += Math.round(CLOUD_TARGET_POINTS * mul)
     }
   }
 
@@ -247,18 +248,22 @@ export function applyFloatingTargetHitsForBall(
         : null
     const hitR =
       vn != null
-        ? cloudSpriteHitRadiusPx(sim.h, vn.bounds, s)
-        : CLOUD_HIT_RADIUS * s
+        ? cloudSpriteHitRadiusPx(sim.h, vn.bounds, s, cloudScreenScaleMul)
+        : CLOUD_HIT_RADIUS * s * cloudScreenScaleMul
     if (circlesOverlap(ball.x, ball.y, br, c.x, cy, hitR)) {
       c.state = 'popping'
       c.popRemain = CLOUD_POP_DURATION
-      sim.score += CLOUD_TARGET_POINTS
-      /* “From heaven”: parachute hot dog drops from this cloud when it is triggered. */
-      if (sim.parachutePayloads.length < MAX_PARACHUTES) {
+      const mulC = Math.max(1, sim.scorePointMultiplier)
+      sim.score += Math.round(CLOUD_TARGET_POINTS * mulC)
+      /* Composite chute+dog sprite only (no vector fallback). */
+      if (
+        cloudPack?.hotdog != null &&
+        sim.parachutePayloads.length < MAX_PARACHUTES
+      ) {
         sim.parachutePayloads.push({
           id: sim.nextFloatingTargetId++,
           x: c.x,
-          y: cy + 18,
+          y: cy + 40 * s,
           swayPhase: Math.random() * Math.PI * 2,
           alive: true,
           age: 0,
@@ -272,7 +277,8 @@ export function applyFloatingTargetHitsForBall(
 export function drawFloatingCloudLayer(
   ctx: CanvasRenderingContext2D,
   sim: FloatingCloudSimFields,
-  cloudPack: CloudTargetPack | null
+  cloudPack: CloudTargetPack | null,
+  cloudScreenScaleMul = 1
 ): void {
   const t = sim.simTime
   const s = Math.max(0.25, sim.sceneLayout.scale)
@@ -288,7 +294,7 @@ export function drawFloatingCloudLayer(
       const u =
         1 - Math.max(0, Math.min(CLOUD_POP_DURATION, c.popRemain)) / CLOUD_POP_DURATION
       if (vn != null) {
-        drawCloudSpritePopping(ctx, c.x, y, vn, sim.h, s, u)
+        drawCloudSpritePopping(ctx, c.x, y, vn, sim.h, s, u, cloudScreenScaleMul)
       } else {
         ctx.save()
         ctx.translate(c.x, y)
@@ -297,7 +303,13 @@ export function drawFloatingCloudLayer(
         ctx.strokeStyle = `rgba(255, 240, 220, ${0.45 + u * 0.4})`
         ctx.lineWidth = 3 + u * 10
         ctx.beginPath()
-        ctx.arc(0, 0, CLOUD_HIT_RADIUS * s + u * 55 * s, 0, Math.PI * 2)
+        ctx.arc(
+          0,
+          0,
+          (CLOUD_HIT_RADIUS * s + u * 55 * s) * cloudScreenScaleMul,
+          0,
+          Math.PI * 2
+        )
         ctx.stroke()
         ctx.globalAlpha = 1
         ctx.restore()
@@ -306,12 +318,13 @@ export function drawFloatingCloudLayer(
     }
 
     if (vn != null) {
-      drawCloudSpriteDrifting(ctx, c.x, y, vn, sim.h, s)
+      drawCloudSpriteDrifting(ctx, c.x, y, vn, sim.h, s, cloudScreenScaleMul)
       continue
     }
 
     ctx.save()
     ctx.translate(c.x, y)
+    const m = cloudScreenScaleMul
     // Placeholder cloud: soft ellipse cluster (no WebP pack)
     const blob = (
       ox: number,
@@ -325,56 +338,36 @@ export function drawFloatingCloudLayer(
       ctx.fillStyle = fill
       ctx.fill()
     }
-    blob(-28 * s, 4 * s, 34 * s, 22 * s, 'rgba(230, 238, 248, 0.42)')
-    blob(8 * s, 0, 40 * s, 26 * s, 'rgba(220, 232, 245, 0.5)')
-    blob(36 * s, 6 * s, 30 * s, 20 * s, 'rgba(210, 226, 240, 0.38)')
+    blob(-28 * s * m, 4 * s * m, 34 * s * m, 22 * s * m, 'rgba(230, 238, 248, 0.42)')
+    blob(8 * s * m, 0, 40 * s * m, 26 * s * m, 'rgba(220, 232, 245, 0.5)')
+    blob(36 * s * m, 6 * s * m, 30 * s * m, 20 * s * m, 'rgba(210, 226, 240, 0.38)')
 
     ctx.strokeStyle = 'rgba(212, 48, 48, 0.85)'
-    ctx.lineWidth = Math.max(1.25, 2.5 * s)
+    ctx.lineWidth = Math.max(1.25, 2.5 * s * m)
     ctx.beginPath()
-    ctx.arc(0, 0, CLOUD_HIT_RADIUS * s * 0.42, 0, Math.PI * 2)
+    ctx.arc(0, 0, CLOUD_HIT_RADIUS * s * 0.42 * m, 0, Math.PI * 2)
     ctx.stroke()
     ctx.fillStyle = 'rgba(255, 80, 72, 0.35)'
     ctx.beginPath()
-    ctx.arc(0, 0, CLOUD_HIT_RADIUS * s * 0.28, 0, Math.PI * 2)
+    ctx.arc(0, 0, CLOUD_HIT_RADIUS * s * 0.28 * m, 0, Math.PI * 2)
     ctx.fill()
 
     ctx.restore()
   }
 
-  for (const p of sim.parachutePayloads) {
-    if (!p.alive) continue
-    ctx.save()
-    ctx.translate(p.x, p.y)
-
-    // Parachute dome + cords
-    ctx.strokeStyle = 'rgba(200, 210, 225, 0.75)'
-    ctx.fillStyle = 'rgba(210, 220, 235, 0.55)'
-    ctx.lineWidth = Math.max(1, 1.5 * s)
-    ctx.beginPath()
-    ctx.arc(0, -22 * s, 22 * s, Math.PI, 0)
-    ctx.lineTo(18 * s, -10 * s)
-    ctx.lineTo(-18 * s, -10 * s)
-    ctx.closePath()
-    ctx.fill()
-    ctx.stroke()
-
-    ctx.beginPath()
-    ctx.moveTo(-12 * s, -8 * s)
-    ctx.lineTo(-6 * s, 2 * s)
-    ctx.moveTo(12 * s, -8 * s)
-    ctx.lineTo(6 * s, 2 * s)
-    ctx.stroke()
-
-    // Hot dog capsule
-    ctx.fillStyle = 'rgba(200, 120, 70, 0.92)'
-    ctx.strokeStyle = 'rgba(90, 50, 30, 0.65)'
-    ctx.lineWidth = Math.max(1, 1.25 * s)
-    ctx.beginPath()
-    ctx.roundRect(-14 * s, -4 * s, 28 * s, 10 * s, 4 * s)
-    ctx.fill()
-    ctx.stroke()
-
-    ctx.restore()
+  const hd = cloudPack?.hotdog ?? null
+  if (hd != null) {
+    for (const p of sim.parachutePayloads) {
+      if (!p.alive) continue
+      drawParachutePayloadSprite(
+        ctx,
+        p.x,
+        p.y,
+        hd,
+        sim.h,
+        s,
+        cloudScreenScaleMul
+      )
+    }
   }
 }

@@ -1,9 +1,11 @@
+import { useState } from 'react'
 import { GameCanvas } from './GameCanvas'
 import { useGameLayout } from './gameLayout'
 import { RotatePlayHint } from './RotatePlayHint'
 
 function App() {
   const layout = useGameLayout()
+  const [devToolsOpen, setDevToolsOpen] = useState(false)
 
   return (
     <div className="app-page">
@@ -21,7 +23,10 @@ function App() {
               <div className="game-cabinet__teal">
                 <div className="game-cabinet__silver">
                   <div className="game-cabinet__stage">
-                    <GameCanvas />
+                    <GameCanvas
+                      devToolsOpen={devToolsOpen}
+                      onDevToolsOpenChange={setDevToolsOpen}
+                    />
                   </div>
                 </div>
               </div>
@@ -31,7 +36,11 @@ function App() {
         {!layout.isMobile ? (
           <aside
             id="game-dev-tools-host"
-            className="game-dev-aside"
+            className={
+              devToolsOpen
+                ? 'game-dev-aside game-dev-aside--open'
+                : 'game-dev-aside'
+            }
             aria-label="Developer tools"
           />
         ) : null}

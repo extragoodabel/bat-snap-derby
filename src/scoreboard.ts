@@ -1,7 +1,7 @@
 /**
  * Retro park scoreboard + per-ring target point values.
  * Timed mode is optional (see SCOREBOARD_TIMED_MODE).
- * All panel sizes / fonts scale with `layoutScale` (design reference 1600×900).
+ * All panel sizes / fonts scale with `layoutScale` (design reference 2048×1152).
  */
 
 /**
@@ -23,10 +23,12 @@ export const SCOREBOARD_TIMED_MODE = false
 
 export const SCOREBOARD_TIME_LIMIT_SEC = 90
 
-/** Panel width at design scale = 1 (reference 1600×900). */
+/** Panel width at design scale = 1 (reference 2048×1152). */
 const SCOREBOARD_PANEL_W_DESIGN = 300
 const SCOREBOARD_PANEL_H_DESIGN = 228
 const SCOREBOARD_PANEL_H_MULT_DESIGN = 270
+/** Extra row: “DOUBLE TIME” + countdown while Spacey bonus is active. */
+const SCOREBOARD_PANEL_H_DOUBLE_COUNTDOWN_DESIGN = 312
 
 export function formatTimerMmSs(seconds: number): string {
   const s = Math.max(0, Math.floor(seconds + 1e-6))
@@ -40,6 +42,8 @@ export type ScoreboardDrawParams = {
   timedMode: boolean
   timerRemainingSec: number | null
   comboMultiplier?: number
+  /** Seconds remaining for all-points ×2 (Spacey); `null` / 0 = hide countdown row. */
+  allPointsDoubleRemainSec?: number | null
 }
 
 export type ScoreboardScreenRect = {
@@ -81,8 +85,14 @@ export function getScoreboardScreenRect(
   const marginX = m * 0.022 + 14 * s
   const marginY = m * 0.02 + 12 * s
   const hasMult = (p.comboMultiplier ?? 1) > 1.001
+  const hasDoubleCd = (p.allPointsDoubleRemainSec ?? 0) > 0.001
   const panelW = Math.min(w * 0.44, SCOREBOARD_PANEL_W_DESIGN * s)
-  const panelH = (hasMult ? SCOREBOARD_PANEL_H_MULT_DESIGN : SCOREBOARD_PANEL_H_DESIGN) * s
+  const panelHDesign = hasMult
+    ? hasDoubleCd
+      ? SCOREBOARD_PANEL_H_DOUBLE_COUNTDOWN_DESIGN
+      : SCOREBOARD_PANEL_H_MULT_DESIGN
+    : SCOREBOARD_PANEL_H_DESIGN
+  const panelH = panelHDesign * s
   const x0 = w - marginX - panelW
   const y0 = marginY
   return { x: x0, y: y0, width: panelW, height: panelH }
@@ -90,7 +100,7 @@ export function getScoreboardScreenRect(
 
 /**
  * Large upper-right park board: smoked acrylic, lit frame, shallow perspective.
- * @param layoutScale from `SceneLayout.scale` (min(w/1600, h/900)).
+ * @param layoutScale from `SceneLayout.scale` (min(w/2048, h/1152)).
  */
 export function drawRetroScoreboard(
   ctx: CanvasRenderingContext2D,
@@ -106,8 +116,14 @@ export function drawRetroScoreboard(
   const marginY = m * 0.02 + 12 * s
 
   const hasMult = (p.comboMultiplier ?? 1) > 1.001
+  const hasDoubleCd = (p.allPointsDoubleRemainSec ?? 0) > 0.001
   const panelW = Math.min(w * 0.44, SCOREBOARD_PANEL_W_DESIGN * s)
-  const panelH = (hasMult ? SCOREBOARD_PANEL_H_MULT_DESIGN : SCOREBOARD_PANEL_H_DESIGN) * s
+  const panelHDesign = hasMult
+    ? hasDoubleCd
+      ? SCOREBOARD_PANEL_H_DOUBLE_COUNTDOWN_DESIGN
+      : SCOREBOARD_PANEL_H_MULT_DESIGN
+    : SCOREBOARD_PANEL_H_DESIGN
+  const panelH = panelHDesign * s
 
   const x0 = w - marginX - panelW
   const y0 = marginY
@@ -269,6 +285,27 @@ export function drawRetroScoreboard(
     ctx.strokeText(multStr, padX, multBase)
     ctx.fillStyle = 'rgba(255, 225, 175, 0.98)'
     ctx.fillText(multStr, padX, multBase)
+
+    if (hasDoubleCd && p.allPointsDoubleRemainSec != null) {
+      my = multBase + 14 * s
+      ctx.textBaseline = 'top'
+      ctx.font = fontOswald(600, 11, s)
+      ctx.fillStyle = 'rgba(255, 210, 160, 0.92)'
+      ctx.fillText('DOUBLE TIME', padX, my)
+      my += 20 * s
+      ctx.textBaseline = 'alphabetic'
+      ctx.font = fontBebas(400, 28, s)
+      const cdStr = formatTimerMmSs(Math.ceil(p.allPointsDoubleRemainSec))
+      const cdBase = my + 24 * s
+      ctx.lineWidth = Math.max(1.5, 3 * s)
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.45)'
+      ctx.strokeText(cdStr, padX, cdBase)
+      const urgent = p.allPointsDoubleRemainSec <= 5
+      ctx.fillStyle = urgent
+        ? 'rgba(255, 200, 150, 0.98)'
+        : 'rgba(200, 255, 230, 0.96)'
+      ctx.fillText(cdStr, padX, cdBase)
+    }
   }
 
   ctx.restore()
