@@ -25,6 +25,7 @@ import { MobileArcadeControls } from './MobileArcadeControls'
 import { drawSpring } from './drawSpring'
 import {
   drawBackgroundFieldLayer,
+  drawBackgroundHillLayer,
   drawBackgroundSkyLayer,
   drawBatSprite,
   drawSpriteDebugOverlay,
@@ -40,8 +41,7 @@ import {
   drawPitcher,
   getPitcherReleaseSpawnScreen,
   loadPitcherPack,
-  PITCHER_HORIZONTAL_GROUP_NUDGE_X_PX,
-  PITCHER_VERTICAL_GROUP_NUDGE_Y_PX,
+  pitcherMoundAnchorScreen,
   timeToNextPitcherReleasePhase,
   type PitcherPack,
 } from './pitcherAnimation'
@@ -92,12 +92,16 @@ import {
   GALLERY_RING_SHIFT_MID_DESIGN,
   GALLERY_ROOT_OFFSET_Y_DESIGN,
   GRAB_THRESH_BASE_DESIGN,
-  POWER_BAR_DROP_TOWARD_PIVOT_DESIGN,
-  POWER_BAR_GAP_ABOVE_SWING_DESIGN,
-  POWER_BAR_HEIGHT_DESIGN,
-  POWER_BAR_LABEL_CLEARANCE_DESIGN,
-  POWER_BAR_MIN_WIDTH_DESIGN,
-  PITCH_MOUND_NUDGE_UP_DESIGN,
+  MOOSE_TARGET_TEX_ANCHOR_X_FR,
+  MOOSE_TARGET_TEX_ANCHOR_Y_FR,
+  MOOSE_TARGET_TEX_RADIUS_FR_OF_NAT_W,
+  POWER_FIELD_BOARD_ASPECT,
+  POWER_FIELD_BOARD_CENTER_X_FR,
+  POWER_FIELD_BOARD_CENTER_Y_FR,
+  POWER_FIELD_BOARD_GAP_ABOVE_STATUE_TOP_DESIGN,
+  POWER_FIELD_BOARD_SHEAR_RISE_PER_WIDTH_FR,
+  POWER_FIELD_BOARD_STATUE_REL_CX_FR,
+  POWER_FIELD_BOARD_WIDTH_FR,
   type SceneLayout,
 } from './sceneLayout'
 
@@ -106,12 +110,12 @@ const FALLBACK_BOARD_ASPECT = BOARD_DESIGN_ASPECT
 
 /** Logical canvas must leave room for cabinet chrome; totals must match `index.css` :root. */
 function readPlayfieldFrameBudgetPx(): { x: number; y: number } {
-  if (typeof document === 'undefined') return { x: 76, y: 79 }
+  if (typeof document === 'undefined') return { x: 44, y: 44 }
   const cs = getComputedStyle(document.documentElement)
   const x =
-    parseFloat(cs.getPropertyValue('--playfield-frame-total-x').trim()) || 76
+    parseFloat(cs.getPropertyValue('--playfield-frame-total-x').trim()) || 44
   const y =
-    parseFloat(cs.getPropertyValue('--playfield-frame-total-y').trim()) || 79
+    parseFloat(cs.getPropertyValue('--playfield-frame-total-y').trim()) || 44
   return { x: Math.max(0, x), y: Math.max(0, y) }
 }
 const GRAVITY = 700
@@ -247,18 +251,11 @@ const PITCH_INCOMING_AY_MAX = 120
 /** Wide strike-height variety on the bat (t pivot→tip); bias upward in pickPitchVariantFields. */
 const PITCH_CONTACT_FR_MIN = 0.48
 const PITCH_CONTACT_FR_MAX = 0.97
-/** Pitch origin: horizontal center of scene (mound). */
-const PITCH_MOUND_X_FR = 0.5
-/**
- * Pitch origin Y (fraction of h, top→down): center of lower 1/8 of screen
- * (band [7/8, 1] → midpoint 15/16).
- */
-const PITCH_MOUND_Y_FR = 15 / 16
-/** Logical px: move release point up (smaller Y) toward visible mound art. */
+/** Mound placement matches pitcher via `pitcherMoundAnchorScreen` (pitcherAnimation). */
 /**
  * Incoming ball radius multiplier at release (grows to 1.0 by ideal contact time).
+ * Smaller at release → clearer “approach” as radius ramps to full near the plate.
  */
-/** Smaller at release → clearer “approach” as radius ramps to full near the plate. */
 const PITCH_DEPTH_START_R_MUL = 0.22
 /**
  * Incoming pitch aims along the launch bat but caps distance from pivot so the
@@ -374,7 +371,7 @@ type ExitRewardBand = 'standard' | 'carry' | 'power' | 'moonshot'
 
 type VerticalShotBand = 'LOW' | 'PLAYFIELD' | 'HIGH'
 
-type OutcomeClass = 'ordinary' | 'strong' | 'elite'
+type OutcomeClass = 'ordinary' | 'strong' | 'elite' | 'lofted'
 
 type ContactQualityBucket =
   | 'miss'
@@ -416,6 +413,9 @@ function thetaChargeFromPointer(px: number, py: number, ptr: Vec2): number {
 
 /** Normalized joystick vector (−1…1); maps to same θ arc as pivot→pointer on desktop. */
 const MOBILE_JOYSTICK_DEADZONE = 0.14
+/** When the stick is near center, charging still needs a non-rest θ (lift-to-swing). */
+const MOBILE_JOYSTICK_DEFAULT_PULL_X = -0.52
+const MOBILE_JOYSTICK_DEFAULT_PULL_Y = -0.2
 
 function thetaFromNormalizedJoystick(
   pivot: Vec2,
@@ -595,6 +595,7 @@ type Sim = {
   spaceyAnchorYFr: number
   spaceyNudgeX: number
   spaceySpawnIsLeft: boolean
+  spaceySpawnIsFieldScoreboard: boolean
   spaceyPeekRad: number
   spaceyCelebrateRemain: number
   spaceySpawnCycle: number
@@ -916,7 +917,8 @@ function drawRingRowTargets(
   ring: DiscWheelRing,
   ringIdx: number,
   revealLabels: boolean,
-  targetR: number
+  targetR: number,
+  mooseTargetImg: HTMLImageElement | null
 ): void {
   const Rmid = ringMidFromDiscRing(ring)
   const { x: cx, y: cy } = ring.center
@@ -947,47 +949,75 @@ function drawRingRowTargets(
     const active = slot.isActive
     const pal = RING_TARGET_PALETTE[ringIdx] ?? RING_TARGET_PALETTE[0]
 
-    /* Lower-half pegs are occluded in play — skip grey placeholder discs (still show in dev). */
+    /* Lower-half pegs: skip in play (no spinning grey placeholders). */
     if (!upper && !revealLabels) {
       continue
     }
-
-    ctx.beginPath()
-    ctx.arc(pt.x, pt.y, targetR, 0, Math.PI * 2)
-    if (!upper) {
-      ctx.fillStyle = 'rgba(72, 78, 92, 0.38)'
-      ctx.strokeStyle = 'rgba(55, 60, 72, 0.55)'
-      ctx.lineWidth = 1.5
-      ctx.fill()
-      ctx.stroke()
-    } else if (active) {
-      ctx.fillStyle = pal.liveFill
-      ctx.strokeStyle = pal.liveStroke
-      ctx.lineWidth = 2.25
-      ctx.fill()
-      ctx.stroke()
-    } else {
-      ctx.strokeStyle = 'rgba(160, 140, 100, 0.75)'
-      ctx.lineWidth = 2.5
-      ctx.stroke()
+    /*
+     * Inactive rim pegs used to draw dim stroked point labels on every slot — reads as a
+     * rotating grey “wheel”. In play, only the live peg is drawn; dev reveal can still tag slots.
+     */
+    if (upper && !active && !revealLabels) {
+      continue
     }
 
-    const pts = targetPointsForRing(ringIdx)
-    ctx.save()
-    const fontPx = Math.round(clamp(targetR * 1.14, 12, 22))
-    ctx.font = `600 ${fontPx}px "Oswald", "Bebas Neue", Impact, sans-serif`
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    const dimLabel = !upper || !active
-    ctx.lineWidth = dimLabel ? 1.5 : 2.25
-    ctx.strokeStyle = dimLabel ? 'rgba(0,0,0,0.42)' : 'rgba(0,0,0,0.35)'
-    ctx.fillStyle = dimLabel
-      ? 'rgba(240, 242, 248, 0.52)'
-      : 'rgba(255,255,255,0.97)'
-    const label = String(pts)
-    ctx.strokeText(label, pt.x, pt.y)
-    ctx.fillText(label, pt.x, pt.y)
-    ctx.restore()
+    const drawLiveDisc = upper && active
+    const drawDebugLowerDisc = !upper && revealLabels
+
+    if (drawLiveDisc || drawDebugLowerDisc) {
+      /** Only the middle wheel (51 pt row, `TARGET_RING_POINTS[1]`) uses the moose art. */
+      const useMoose =
+        ringIdx === 1 &&
+        mooseTargetImg &&
+        mooseTargetImg.complete &&
+        mooseTargetImg.naturalWidth > 0
+
+      if (useMoose) {
+        const iw = mooseTargetImg.naturalWidth
+        const ih = mooseTargetImg.naturalHeight
+        const k = MOOSE_TARGET_TEX_RADIUS_FR_OF_NAT_W
+        const dw = targetR / k
+        const dh = ih * (dw / iw)
+        const ax = pt.x - MOOSE_TARGET_TEX_ANCHOR_X_FR * dw
+        const ay = pt.y - MOOSE_TARGET_TEX_ANCHOR_Y_FR * dh
+        ctx.save()
+        if (drawDebugLowerDisc) ctx.globalAlpha = 0.45
+        ctx.imageSmoothingEnabled = true
+        ctx.drawImage(mooseTargetImg, 0, 0, iw, ih, ax, ay, dw, dh)
+        ctx.restore()
+      } else {
+        ctx.beginPath()
+        ctx.arc(pt.x, pt.y, targetR, 0, Math.PI * 2)
+        if (drawDebugLowerDisc) {
+          ctx.strokeStyle = 'rgba(255, 150, 70, 0.55)'
+          ctx.lineWidth = 1.25
+          ctx.setLineDash([4, 4])
+          ctx.stroke()
+          ctx.setLineDash([])
+        } else {
+          ctx.fillStyle = pal.liveFill
+          ctx.strokeStyle = pal.liveStroke
+          ctx.lineWidth = 2.25
+          ctx.fill()
+          ctx.stroke()
+        }
+      }
+    }
+
+    if (drawLiveDisc && ringIdx !== 1) {
+      const pts = targetPointsForRing(ringIdx)
+      ctx.save()
+      const fontPx = Math.round(clamp(targetR * 1.14, 12, 22))
+      ctx.font = `600 ${fontPx}px "Oswald", "Bebas Neue", Impact, sans-serif`
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.lineWidth = 2.25
+      ctx.strokeStyle = 'rgba(0,0,0,0.35)'
+      ctx.fillStyle = 'rgba(255,255,255,0.97)'
+      ctx.strokeText(String(pts), pt.x, pt.y)
+      ctx.fillText(String(pts), pt.x, pt.y)
+      ctx.restore()
+    }
 
     if (revealLabels) {
       ctx.save()
@@ -1094,6 +1124,7 @@ function createSim(w: number, h: number): Sim {
     spaceyAnchorYFr: 0.42,
     spaceyNudgeX: 50,
     spaceySpawnIsLeft: false,
+    spaceySpawnIsFieldScoreboard: false,
     spaceyPeekRad: 0,
     spaceyCelebrateRemain: 0,
     spaceySpawnCycle: 0,
@@ -1318,7 +1349,19 @@ function pickPitchVariantFields(sim: Sim, seq: number): {
   const aySpan = PITCH_INCOMING_AY_MAX - PITCH_INCOMING_AY_MIN
   const ayRaw = PITCH_INCOMING_AY_MIN + a2 * aySpan
   /** Strong bias to hang / ride vs dive at the hands. */
-  const pitchIncomingAy = ayRaw * 0.45 + PITCH_INCOMING_AY_MIN * 0.55
+  let pitchIncomingAy = ayRaw * 0.45 + PITCH_INCOMING_AY_MIN * 0.55
+  /**
+   * Minority pitch “arc profile” spice (~10%): small extra rise or sink, clamped so the
+   * ball stays in the same readable/hittable envelope as the base model.
+   */
+  if (pitchVariant01(n, 91) < 0.11) {
+    const lift = (pitchVariant01(n, 92) - 0.5) * 92
+    pitchIncomingAy = clamp(
+      pitchIncomingAy + lift,
+      PITCH_INCOMING_AY_MIN * 0.98,
+      PITCH_INCOMING_AY_MAX * 0.93
+    )
+  }
   const pitchReleaseDyPx =
     (a3 - 0.5) * 1.45 * PITCH_RELEASE_DY_FR * m + PITCH_RELEASE_DY_BIAS_FR * m
   return {
@@ -1342,13 +1385,10 @@ function pitchPlannedContactPoint(sim: Sim, pitchContactFracT: number): Vec2 {
 
 /** World position where the pitch spawns (mound). */
 function pitchMoundScreenPoint(sim: Sim, pitchReleaseDyPx: number): Vec2 {
+  const base = pitcherMoundAnchorScreen(sim.w, sim.h, sim.sceneLayout)
   return {
-    x: sim.w * PITCH_MOUND_X_FR + PITCHER_HORIZONTAL_GROUP_NUDGE_X_PX,
-    y:
-      sim.h * PITCH_MOUND_Y_FR +
-      pitchReleaseDyPx * 0.35 -
-      designPx(sim.sceneLayout, PITCH_MOUND_NUDGE_UP_DESIGN) +
-      PITCHER_VERTICAL_GROUP_NUDGE_Y_PX,
+    x: base.x,
+    y: base.y + pitchReleaseDyPx * 0.35,
   }
 }
 
@@ -1512,6 +1552,126 @@ function classifyOutcomeClass(exitBand: ExitRewardBand): OutcomeClass {
   if (exitBand === 'moonshot') return 'elite'
   if (exitBand === 'power' || exitBand === 'carry') return 'strong'
   return 'ordinary'
+}
+
+/**
+ * Minority (~10%) “spice” layer: more parabolic / lofted flies tied to plausible weak contact
+ * (late, under-barrel, off sweet spot). Does not replace the main outcome path.
+ */
+function loftedTrajectoryEligibility01(
+  bucket: ContactQualityBucket,
+  timingErrorSec: number,
+  sweetQu: number,
+  contactAlongT: number,
+  pullbackU: number,
+  quality: number
+): number {
+  if (bucket === 'dribble' || bucket === 'miss') return 0
+  let e = 0.05
+  if (bucket === 'poor_late' || bucket === 'good_late') e += 0.32
+  if (bucket === 'poor_early' || bucket === 'good_early') e += 0.14
+  if (timingErrorSec > 0.035) e += 0.1
+  if (timingErrorSec < -0.035) e += 0.07
+  if (sweetQu < 0.48) e += 0.2
+  if (contactAlongT < 0.56) e += 0.14
+  const pu = clamp(pullbackU, 0, 1)
+  if (pu > 0.3 && pu < 0.74) e += 0.09
+  e *= 0.55 + 0.45 * (1 - quality)
+  return clamp(e, 0, 0.98)
+}
+
+/** Keep loft additions from flipping horizontal carry away from the playable wedge. */
+function clampLoftDeltaRad(angleRad: number, deltaRad: number): number {
+  const minCos = -0.1
+  if (deltaRad <= 0) return 0
+  let d = Math.min(deltaRad, 0.28)
+  for (let k = 0; k < 10; k++) {
+    if (Math.cos(angleRad + d) <= minCos) return d
+    d *= 0.78
+  }
+  return 0
+}
+
+function applyLoftedTrajectorySpice(args: {
+  variantPitchSeq: number
+  exitBand: ExitRewardBand
+  bucket: ContactQualityBucket
+  timingErrorSec: number
+  sweetQu: number
+  contactAlongT: number
+  pullbackU: number
+  quality: number
+  angleRad: number
+  speedOut: number
+  baseGravityMul: number
+}): {
+  vx: number
+  vy: number
+  speedOut: number
+  gravityMul: number
+  applied: boolean
+} {
+  const {
+    variantPitchSeq,
+    exitBand,
+    bucket,
+    timingErrorSec,
+    sweetQu,
+    contactAlongT,
+    pullbackU,
+    quality,
+    angleRad,
+    speedOut,
+    baseGravityMul,
+  } = args
+
+  if (exitBand === 'moonshot' || bucket === 'dribble') {
+    return {
+      vx: Math.cos(angleRad) * speedOut,
+      vy: Math.sin(angleRad) * speedOut,
+      speedOut,
+      gravityMul: baseGravityMul,
+      applied: false,
+    }
+  }
+
+  const elig = loftedTrajectoryEligibility01(
+    bucket,
+    timingErrorSec,
+    sweetQu,
+    contactAlongT,
+    pullbackU,
+    quality
+  )
+  const pTry = clamp(0.028 + 0.2 * elig, 0.022, 0.13)
+  const roll = pitchVariant01(variantPitchSeq + 71, 29)
+  if (roll >= pTry) {
+    return {
+      vx: Math.cos(angleRad) * speedOut,
+      vy: Math.sin(angleRad) * speedOut,
+      speedOut,
+      gravityMul: baseGravityMul,
+      applied: false,
+    }
+  }
+
+  const h1 = pitchVariant01(variantPitchSeq + 72, 30)
+  const h2 = pitchVariant01(variantPitchSeq + 73, 31)
+  const h3 = pitchVariant01(variantPitchSeq + 74, 32)
+  const deltaBase = 0.06 + 0.13 * h1
+  const delta = clampLoftDeltaRad(angleRad, deltaBase * (0.55 + 0.45 * elig))
+  const ang2 = angleRad + delta
+  const spMul = 0.88 + 0.09 * h2
+  const sp2 = clamp(speedOut * spMul, 380, OUT_SPEED_MAX * 1.05)
+  const gMul = clamp(baseGravityMul * (0.91 + 0.09 * h3), 0.74, 1.02)
+
+  return {
+    vx: Math.cos(ang2) * sp2,
+    vy: Math.sin(ang2) * sp2,
+    speedOut: sp2,
+    gravityMul: gMul,
+    applied: delta > 1e-4,
+  }
 }
 
 /** −1 = full charge toward left, +1 toward right (rest ≈ 0). Player agency on field aim. */
@@ -1679,8 +1839,23 @@ function battedBallOutcome(
           : OUT_SPEED_MAX
   speedOut = bucket === 'dribble' ? speed : clamp(speedOut, 420, maxSp)
 
-  const vx = Math.cos(angle) * speedOut
-  const vy = Math.sin(angle) * speedOut
+  const lofted = applyLoftedTrajectorySpice({
+    variantPitchSeq,
+    exitBand,
+    bucket,
+    timingErrorSec,
+    sweetQu,
+    contactAlongT,
+    pullbackU: pu,
+    quality,
+    angleRad: angle,
+    speedOut,
+    baseGravityMul: bon.gravityMul,
+  })
+  const vx = lofted.vx
+  const vy = lofted.vy
+  const speedForHud = lofted.speedOut
+  const gravityMulOut = lofted.gravityMul
   const aimDeg = (Math.atan2(vy, vx) * 180) / Math.PI
   let tier: PowerTier =
     bucket === 'dribble' || bucket === 'poor_early' || bucket === 'poor_late'
@@ -1701,7 +1876,7 @@ function battedBallOutcome(
     tier = 'strong'
   }
 
-  const gEff = OUTGOING_GRAVITY * bon.gravityMul
+  const gEff = OUTGOING_GRAVITY * gravityMulOut
   const verticalBand = verticalOutcomeBandAtGalleryCrossing(
     sim,
     fromX,
@@ -1710,18 +1885,21 @@ function battedBallOutcome(
     vy,
     gEff
   )
-  const outcomeClass = classifyOutcomeClass(exitBand)
+  let outcomeClass: OutcomeClass = classifyOutcomeClass(exitBand)
+  if (lofted.applied && exitBand !== 'moonshot') {
+    if (outcomeClass === 'ordinary') outcomeClass = 'lofted'
+  }
 
   return {
     vx,
     vy,
     bucket,
     tier,
-    speed: speedOut,
+    speed: speedForHud,
     aimDeg,
     transferEff: transfer,
     exitBand,
-    outgoingGravityMul: bon.gravityMul,
+    outgoingGravityMul: gravityMulOut,
     verticalBand,
     outcomeClass,
   }
@@ -1786,30 +1964,6 @@ function computePitchHud(sim: Sim): PitchHudState {
   return 'idle'
 }
 
-const YAWED_RING_STYLES = [
-  {
-    g0: '#8a8a92',
-    g1: '#a8a8b0',
-    g2: '#787880',
-    strokeO: '#2e3038',
-    strokeI: '#5c5e68',
-  },
-  {
-    g0: '#6e7580',
-    g1: '#8e95a0',
-    g2: '#5a6068',
-    strokeO: '#252830',
-    strokeI: '#4a5058',
-  },
-  {
-    g0: '#585c68',
-    g1: '#787c88',
-    g2: '#484c58',
-    strokeO: '#1c1e24',
-    strokeI: '#454a55',
-  },
-] as const
-
 const RING_TARGET_PALETTE = [
   {
     liveFill: 'rgba(120, 220, 255, 0.95)',
@@ -1824,46 +1978,6 @@ const RING_TARGET_PALETTE = [
     liveStroke: 'rgba(110, 70, 170, 0.88)',
   },
 ] as const
-
-/** One annulus; ringIndex picks tone (0 front … 2 back). */
-function drawYawedAnnulus(
-  ctx: CanvasRenderingContext2D,
-  cx: number,
-  cy: number,
-  sx: number,
-  ROuter: number,
-  RInner: number,
-  ringIndex: number
-): void {
-  const rxO = sx * ROuter
-  const ryO = ROuter
-  const rxI = sx * RInner
-  const ryI = RInner
-  const st = YAWED_RING_STYLES[ringIndex] ?? YAWED_RING_STYLES[1]
-
-  const g = ctx.createLinearGradient(cx - rxO, cy, cx + rxO, cy)
-  g.addColorStop(0, st.g0)
-  g.addColorStop(0.5, st.g1)
-  g.addColorStop(1, st.g2)
-
-  ctx.fillStyle = g
-  ctx.beginPath()
-  ctx.ellipse(cx, cy, rxO, ryO, 0, 0, Math.PI * 2)
-  ctx.ellipse(cx, cy, rxI, ryI, 0, 0, Math.PI * 2, true)
-  ctx.fill('evenodd')
-
-  ctx.strokeStyle = st.strokeO
-  ctx.lineWidth = 2.5
-  ctx.beginPath()
-  ctx.ellipse(cx, cy, rxO, ryO, 0, 0, Math.PI * 2)
-  ctx.stroke()
-
-  ctx.strokeStyle = st.strokeI
-  ctx.lineWidth = 1.5
-  ctx.beginPath()
-  ctx.ellipse(cx, cy, rxI, ryI, 0, 0, Math.PI * 2)
-  ctx.stroke()
-}
 
 /**
  * Always-on (non-debug) cues: pitch corridor, contact disk, and a “ripe” hint when the ball
@@ -2123,79 +2237,116 @@ function drawPowerBar(
 ): void {
   const { pivot: p, batLen: L } = sim
   const s = sim.sceneLayout.scale
-  const barW = clamp(
-    L * 2.45,
-    designPx(sim.sceneLayout, POWER_BAR_MIN_WIDTH_DESIGN),
-    sim.w * 0.58
-  )
-  const barH = designPx(sim.sceneLayout, POWER_BAR_HEIGHT_DESIGN)
-  const arcTopY = p.y - L
   const padEdge = Math.max(6, 10 * s)
-  let by =
-    arcTopY -
-    designPx(sim.sceneLayout, POWER_BAR_GAP_ABOVE_SWING_DESIGN) -
-    barH -
-    designPx(sim.sceneLayout, POWER_BAR_LABEL_CLEARANCE_DESIGN) +
-    designPx(sim.sceneLayout, POWER_BAR_DROP_TOWARD_PIVOT_DESIGN)
-  by = clamp(by, padEdge, sim.h - barH - padEdge)
-  const bx = clamp(p.x - barW / 2, padEdge, sim.w - barW - padEdge)
+  const { w: cw, h: ch } = sim
+
+  /** Match field-layer digital board: slim strip above Ichiro (~⅓ canvas width). */
+  const barW = Math.min(cw - padEdge * 2, cw * POWER_FIELD_BOARD_WIDTH_FR)
+  const barH = Math.max(
+    designPx(sim.sceneLayout, 5.5),
+    barW / POWER_FIELD_BOARD_ASPECT
+  )
+
+  const shearPx = barW * POWER_FIELD_BOARD_SHEAR_RISE_PER_WIDTH_FR
+  const shearYPerX = shearPx / Math.max(barW, 1)
+
+  const sl = sim.spriteLayout
+  let bx: number
+  let by: number
+  if (sl) {
+    const cxBoard =
+      sl.statueX + sl.statueW * POWER_FIELD_BOARD_STATUE_REL_CX_FR
+    bx = cxBoard - barW / 2
+    const gapPx = designPx(
+      sim.sceneLayout,
+      POWER_FIELD_BOARD_GAP_ABOVE_STATUE_TOP_DESIGN
+    )
+    /* Top-left `by` so bottom of sheared quad (by + barH + shearPx) clears statue top. */
+    by = sl.statueY - gapPx - barH - shearPx
+  } else {
+    const cxBoard = cw * POWER_FIELD_BOARD_CENTER_X_FR
+    const cyBoard = ch * POWER_FIELD_BOARD_CENTER_Y_FR
+    bx = cxBoard - barW / 2
+    by = cyBoard - barH / 2
+  }
+  bx = clamp(bx, padEdge, cw - barW - padEdge)
+
+  /* Keep the strip above the bat crown if the two overlap at this scale. */
+  const batCrownY = p.y - L * 0.92
+  const topY = Math.min(by, by + shearPx)
+  if (topY > batCrownY - 4 * s) {
+    by = batCrownY - shearPx - 4 * s
+  }
+  by = clamp(by, padEdge, ch - barH - shearPx - padEdge)
 
   const phaseDim =
     sim.phase === 'recovery' ? 0.55 : sim.phase === 'swing' ? 0.88 : 1
 
+  const fp = clamp(fillP, 0, 1)
+  const cornerR = Math.min(3.5 * s, barH * 0.42)
+
   ctx.save()
   ctx.globalAlpha = phaseDim
+  ctx.translate(bx, by)
+  ctx.transform(1, shearYPerX, 0, 1, 0, 0)
 
-  ctx.fillStyle = 'rgba(14, 24, 28, 0.48)'
-  ctx.strokeStyle = 'rgba(95, 175, 160, 0.42)'
-  ctx.lineWidth = Math.max(1.25, 2 * s)
+  ctx.fillStyle = 'rgba(10, 12, 16, 0.92)'
+  ctx.strokeStyle = 'rgba(72, 130, 122, 0.38)'
+  ctx.lineWidth = Math.max(1, 1.35 * s)
   ctx.beginPath()
-  ctx.roundRect(bx, by, barW, barH, Math.max(4, 7 * s))
+  ctx.roundRect(0, 0, barW, barH, cornerR)
   ctx.fill()
   ctx.stroke()
+
+  /* Faint diagonal hatch like the painted scoreboard mesh. */
+  ctx.save()
+  ctx.beginPath()
+  ctx.roundRect(0, 0, barW, barH, cornerR)
+  ctx.clip()
+  ctx.strokeStyle = 'rgba(218, 228, 232, 0.055)'
+  ctx.lineWidth = 1
+  const hatchStep = Math.max(4, designPx(sim.sceneLayout, 7))
+  for (let t = -barH; t < barW + barH; t += hatchStep) {
+    ctx.beginPath()
+    ctx.moveTo(t, -1)
+    ctx.lineTo(t + barH * 1.35, barH + 1)
+    ctx.stroke()
+  }
+  ctx.restore()
 
   const hiPad = Math.max(1.5, 2 * s)
   if (opts?.perfectSendLocked) {
     ctx.strokeStyle = 'rgba(255, 140, 90, 0.52)'
     ctx.lineWidth = Math.max(2, 3 * s)
-    ctx.strokeRect(
-      bx - hiPad,
-      by - hiPad,
-      barW + hiPad * 2,
-      barH + hiPad * 2
-    )
+    ctx.strokeRect(-hiPad, -hiPad, barW + hiPad * 2, barH + hiPad * 2)
   } else if (opts?.fullSendLocked || opts?.fullSendZoneLive) {
     ctx.strokeStyle = 'rgba(255, 215, 150, 0.48)'
     ctx.lineWidth = opts?.fullSendLocked ? Math.max(2, 2.5 * s) : Math.max(1.25, 1.75 * s)
-    ctx.strokeRect(
-      bx - hiPad,
-      by - hiPad,
-      barW + hiPad * 2,
-      barH + hiPad * 2
-    )
+    ctx.strokeRect(-hiPad, -hiPad, barW + hiPad * 2, barH + hiPad * 2)
   }
 
-  const fp = clamp(fillP, 0, 1)
   if (fp > 0) {
-    const innerPad = Math.max(3, 5 * s)
+    const innerPad = Math.max(2, Math.min(3.5 * s, barH * 0.22))
     const iw = barW - innerPad * 2
     const ih = barH - innerPad * 2
-    const g = ctx.createLinearGradient(bx, by, bx + iw, by)
+    const g = ctx.createLinearGradient(0, 0, iw, 0)
     g.addColorStop(0, powerBarColor(fp))
     g.addColorStop(1, powerBarColor(fp * 0.92))
-    ctx.globalAlpha = phaseDim * 0.68
+    ctx.globalAlpha = phaseDim * 0.62
     ctx.fillStyle = g
     ctx.beginPath()
     ctx.roundRect(
-      bx + innerPad,
-      by + innerPad,
+      innerPad,
+      innerPad,
       iw * fp,
       ih,
-      Math.min(6 * s, ih * 0.45)
+      Math.min(4 * s, ih * 0.42)
     )
     ctx.fill()
     ctx.globalAlpha = phaseDim
   }
+
+  ctx.restore()
 
   const pct = Math.round(fp * 100)
   const mainLine = label.trim() ? `${pct}% ${label}` : `${pct}%`
@@ -2208,24 +2359,32 @@ function drawPowerBar(
         : null
 
   const padX = Math.max(6, 10 * s)
-  const cx = bx + barW / 2
+  const cxT = bx + barW / 2
+  const cyT = by + barH / 2 + shearPx * 0.5
+  const fontMain = Math.max(
+    7,
+    Math.min(Math.round(11 * s), Math.max(6, Math.round(barH * 0.92)))
+  )
+  const fontSub = Math.max(6, Math.min(Math.round(9 * s), Math.round(barH * 0.62)))
+
+  ctx.save()
+  ctx.globalAlpha = phaseDim
   ctx.textAlign = 'center'
   if (subLine) {
     ctx.fillStyle = 'rgba(225, 248, 238, 0.92)'
-    ctx.font = `600 ${Math.max(8, Math.round(12 * s))}px "Oswald", "Arial Narrow", system-ui, sans-serif`
+    ctx.font = `600 ${fontMain}px "Oswald", "Arial Narrow", system-ui, sans-serif`
     ctx.textBaseline = 'middle'
-    ctx.fillText(mainLine, cx, by + barH * 0.34, barW - padX * 2)
+    ctx.fillText(mainLine, cxT, by + barH * 0.34 + shearPx * 0.5, barW - padX * 2)
     ctx.fillStyle = 'rgba(255, 210, 175, 0.9)'
-    ctx.font = `600 ${Math.max(7, Math.round(9 * s))}px "Oswald", system-ui, sans-serif`
-    ctx.fillText(subLine, cx, by + barH * 0.72, barW - padX * 2)
+    ctx.font = `600 ${fontSub}px "Oswald", system-ui, sans-serif`
+    ctx.fillText(subLine, cxT, by + barH * 0.72 + shearPx * 0.5, barW - padX * 2)
   } else {
     ctx.fillStyle = 'rgba(225, 248, 238, 0.9)'
-    ctx.font = `600 ${Math.max(9, Math.round(13 * s))}px "Oswald", "Arial Narrow", system-ui, sans-serif`
+    ctx.font = `600 ${fontMain}px "Oswald", "Arial Narrow", system-ui, sans-serif`
     ctx.textBaseline = 'middle'
-    ctx.fillText(mainLine, cx, by + barH / 2, barW - padX * 2)
+    ctx.fillText(mainLine, cxT, cyT, barW - padX * 2)
   }
   ctx.textAlign = 'left'
-
   ctx.restore()
 }
 
@@ -2711,7 +2870,12 @@ function trySpawnIncomingPitch(
 
   const target = pitchPlannedContactPoint(sim, variant.pitchContactFracT)
   const start =
-    getPitcherReleaseSpawnScreen(sim.w, sim.h, opts?.pack ?? null) ??
+    getPitcherReleaseSpawnScreen(
+      sim.w,
+      sim.h,
+      sim.sceneLayout,
+      opts?.pack ?? null
+    ) ??
     pitchMoundScreenPoint(sim, variant.pitchReleaseDyPx)
   const dx = target.x - start.x
   const dy = target.y - start.y
@@ -2769,6 +2933,7 @@ export function GameCanvas({
   const spritesRef = useRef<LoadedGameSprites | null>(null)
   const pitcherPackRef = useRef<PitcherPack | null>(null)
   const cloudPackRef = useRef<CloudTargetPack | null>(null)
+  const mooseTargetImgRef = useRef<HTMLImageElement | null>(null)
   const devDrawOptionsRef = useRef<DevDrawOptions>({
     clipDiscLowerHalf: true,
     revealHiddenLayers: false,
@@ -2792,11 +2957,12 @@ export function GameCanvas({
   const [devToolsHostEl, setDevToolsHostEl] = useState<HTMLElement | null>(null)
   const launcherHudPreRef = useRef<HTMLPreElement | null>(null)
   const mobileJoystickVecRef = useRef({ x: 0, y: 0 })
-  const mobileRapidFireRef = useRef(false)
-  const rapidFireNextSimTimeRef = useRef(Number.POSITIVE_INFINITY)
+  /** Last stick offset outside deadzone while charging (avoids θ→rest when knob nears center). */
+  const mobileLastNondeadJoyRef = useRef({
+    x: MOBILE_JOYSTICK_DEFAULT_PULL_X,
+    y: MOBILE_JOYSTICK_DEFAULT_PULL_Y,
+  })
   const endChargeRef = useRef<((sim: Sim) => void) | null>(null)
-  const [mobileRapidFire, setMobileRapidFire] = useState(false)
-  const prevMobileRapidFireRef = useRef(false)
 
   const resize = useCallback(() => {
     const container = containerRef.current
@@ -2818,9 +2984,15 @@ export function GameCanvas({
     const portraitBand =
       parseFloat(csRoot.getPropertyValue('--mobile-portrait-controls-reserved').trim()) ||
       0
+    const landscapeBand =
+      parseFloat(
+        csRoot.getPropertyValue('--mobile-landscape-controls-reserved').trim()
+      ) || 0
     const layoutKind = document.documentElement.dataset.gameLayout
     if (layoutKind === 'mobile-portrait' && portraitBand > 0) {
       vh = Math.max(1, vh - portraitBand)
+    } else if (layoutKind === 'mobile-landscape' && landscapeBand > 0) {
+      vh = Math.max(1, vh - landscapeBand)
     }
 
     const aspect = boardAspectRef.current
@@ -2861,6 +3033,25 @@ export function GameCanvas({
         'logical',
         `${w.toFixed(0)}×${h.toFixed(0)}`
       )
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    const im = new Image()
+    im.decoding = 'async'
+    im.onload = () => {
+      if (!cancelled) {
+        mooseTargetImgRef.current = im
+        setSpritesRevision((n) => n + 1)
+      }
+    }
+    im.onerror = () => {
+      if (!cancelled) mooseTargetImgRef.current = null
+    }
+    im.src = '/assets/moose.webp'
+    return () => {
+      cancelled = true
     }
   }, [])
 
@@ -2920,8 +3111,8 @@ export function GameCanvas({
   useEffect(() => {
     resize()
     const ro = new ResizeObserver(() => resize())
-    const measureEl = document.getElementById('game-max-fit-rect')
-    if (measureEl) ro.observe(measureEl)
+    const col = document.getElementById('game-fit-column')
+    if (col) ro.observe(col)
     window.addEventListener('resize', resize)
     return () => {
       ro.disconnect()
@@ -2934,9 +3125,19 @@ export function GameCanvas({
     resize()
   }, [resize, layout.kind])
 
-  /** Dev aside width toggles; re-fit canvas immediately (ResizeObserver may lag one frame). */
+  /** Dev aside toggles flex row width; re-fit after layout (RO + next frames). */
   useEffect(() => {
-    resize()
+    const refit = () => resize()
+    refit()
+    const id0 = requestAnimationFrame(() => {
+      refit()
+      requestAnimationFrame(refit)
+    })
+    const t = window.setTimeout(refit, 50)
+    return () => {
+      cancelAnimationFrame(id0)
+      window.clearTimeout(t)
+    }
   }, [resize, devToolsOpen])
 
   useLayoutEffect(() => {
@@ -2946,22 +3147,6 @@ export function GameCanvas({
     }
     setDevToolsHostEl(document.getElementById('game-dev-tools-host'))
   }, [layout.isMobile])
-
-  useEffect(() => {
-    const prev = prevMobileRapidFireRef.current
-    prevMobileRapidFireRef.current = mobileRapidFire
-    mobileRapidFireRef.current = mobileRapidFire
-    if (!mobileRapidFire) {
-      rapidFireNextSimTimeRef.current = Number.POSITIVE_INFINITY
-      return
-    }
-    if (layout.isMobile && !prev && mobileRapidFire) {
-      const sim = simRef.current
-      if (sim?.phase === 'idle' && sim.swingGrabLockoutRemain <= 0) {
-        rapidFireNextSimTimeRef.current = sim.simTime + 0.22
-      }
-    }
-  }, [mobileRapidFire, layout.isMobile])
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current
@@ -3000,12 +3185,18 @@ export function GameCanvas({
     }
 
     const sprites = spritesRef.current
-    if (sprites?.bgSky && sprites?.bgField) {
-      drawBackgroundSkyLayer(ctx, sprites.bgSky, w, h)
-      /* Sky → Spacey → field: bonus sits behind the field layer (both sides). */
+    if (
+      sprites?.bgSkyFrames?.length &&
+      sprites.bgFieldBack &&
+      sprites.bgFieldFront
+    ) {
+      drawBackgroundSkyLayer(ctx, sprites.bgSkyFrames, w, h, sim.simTime)
+      drawBackgroundHillLayer(ctx, sprites.bgHillFrames, w, h, sim.simTime)
+      drawBackgroundFieldLayer(ctx, sprites.bgFieldBack, w, h)
+      /* Spacey between field2 (back) and field1 (front). */
       drawSpacey(ctx, sim, sprites.spacey, sprites.spacey2)
       drawSpaceyCelebrationOverlays(ctx, sim)
-      drawBackgroundFieldLayer(ctx, sprites.bgField, w, h)
+      drawBackgroundFieldLayer(ctx, sprites.bgFieldFront, w, h)
     }
 
     drawReleaseFlash(ctx, sim)
@@ -3019,36 +3210,19 @@ export function GameCanvas({
       if (clipWheel) {
         for (let r = RING_COUNT - 1; r >= 0; r--) {
           const ring = rings[r]
-          const { x: rcx, y: rcy } = ring.center
           ctx.save()
           clipToRegionAboveOccluderY(ctx, fixedOccluderScreenY(ring), sim.w)
-          drawYawedAnnulus(
+          drawRingRowTargets(
             ctx,
-            rcx,
-            rcy,
-            DISC_SX,
-            ring.radiusOuter,
-            ring.radiusInner,
-            r
+            ring,
+            r,
+            dev.revealHiddenLayers,
+            targetRDraw,
+            mooseTargetImgRef.current
           )
-          drawRingRowTargets(ctx, ring, r, dev.revealHiddenLayers, targetRDraw)
           ctx.restore()
         }
       } else {
-        for (let r = RING_COUNT - 1; r >= 0; r--) {
-          const ring = rings[r]
-          const { x: rcx, y: rcy } = ring.center
-          drawYawedAnnulus(
-            ctx,
-            rcx,
-            rcy,
-            DISC_SX,
-            ring.radiusOuter,
-            ring.radiusInner,
-            r
-          )
-        }
-
         if (dev.revealHiddenLayers) {
           for (let r = RING_COUNT - 1; r >= 0; r--) {
             const ring = rings[r]
@@ -3058,7 +3232,14 @@ export function GameCanvas({
         }
 
         for (let r = RING_COUNT - 1; r >= 0; r--) {
-          drawRingRowTargets(ctx, rings[r], r, dev.revealHiddenLayers, targetRDraw)
+          drawRingRowTargets(
+            ctx,
+            rings[r],
+            r,
+            dev.revealHiddenLayers,
+            targetRDraw,
+            mooseTargetImgRef.current
+          )
         }
       }
 
@@ -3084,7 +3265,15 @@ export function GameCanvas({
       ctx.restore()
     }
 
-    drawPitcher(ctx, w, h, sim.simTime, pitcherPackRef.current, 'idleLoop')
+    drawPitcher(
+      ctx,
+      w,
+      h,
+      sim.simTime,
+      sim.sceneLayout,
+      pitcherPackRef.current,
+      'idleLoop'
+    )
 
     const cloudScreenMul = layoutRef.current.isMobile
       ? CLOUD_SPRITE_MOBILE_SCALE_MUL
@@ -3369,8 +3558,6 @@ export function GameCanvas({
     const sim = simRef.current
     if (!sim) return
 
-    const phaseAtFrameEntry = sim.phase
-
     sim.simTime += dt
     updateFloatingCloudLayer(sim, dt)
     updateSpacey(sim, dt)
@@ -3420,7 +3607,15 @@ export function GameCanvas({
         )
       } else {
         const j = mobileJoystickVecRef.current
-        sim.theta = thetaFromNormalizedJoystick(sim.pivot, j.x, j.y)
+        const jm = Math.hypot(j.x, j.y)
+        if (jm >= MOBILE_JOYSTICK_DEADZONE) {
+          mobileLastNondeadJoyRef.current = { x: j.x, y: j.y }
+        }
+        const jUse =
+          jm >= MOBILE_JOYSTICK_DEADZONE
+            ? j
+            : mobileLastNondeadJoyRef.current
+        sim.theta = thetaFromNormalizedJoystick(sim.pivot, jUse.x, jUse.y)
       }
       sim.pCurrent = pullbackNormalizedFromVisualTheta(sim.theta)
       sim.omega = 0
@@ -3808,41 +4003,6 @@ export function GameCanvas({
       }
     }
 
-    const layoutM = layoutRef.current.isMobile
-    if (
-      layoutM &&
-      mobileRapidFireRef.current &&
-      phaseAtFrameEntry === 'recovery' &&
-      sim.phase === 'idle'
-    ) {
-      rapidFireNextSimTimeRef.current = sim.simTime + 0.12
-    }
-    if (
-      layoutM &&
-      mobileRapidFireRef.current &&
-      sim.phase === 'idle' &&
-      sim.swingGrabLockoutRemain <= 0 &&
-      sim.simTime >= rapidFireNextSimTimeRef.current
-    ) {
-      rapidFireNextSimTimeRef.current = Number.POSITIVE_INFINITY
-      const j = mobileJoystickVecRef.current
-      const jm = Math.hypot(j.x, j.y)
-      const sign = jm > 0.12 ? Math.sign(j.x) || -1 : -1
-      const thetaFull = sign >= 0 ? THETA_RIGHT : THETA_LEFT
-      sim.phase = 'charging'
-      sim.mobileChargeViaControls = true
-      sim.theta = thetaFull
-      sim.pCurrent = 1
-      sim.omega = 0
-      sim.chargeElapsed = 0
-      sim.springSwingT0 = null
-      sim.pitchArmElapsed = 0
-      sim.batCrossLaunchTime = null
-      sim.pointer = null
-      endChargeRef.current?.(sim)
-      sim.mobileChargeViaControls = false
-    }
-
     draw()
   })
 
@@ -3907,6 +4067,10 @@ export function GameCanvas({
     if (sim.phase !== 'charging') return
 
     sim.mobileChargeViaControls = false
+    mobileLastNondeadJoyRef.current = {
+      x: MOBILE_JOYSTICK_DEFAULT_PULL_X,
+      y: MOBILE_JOYSTICK_DEFAULT_PULL_Y,
+    }
 
     sim.pRelease = sim.pCurrent
     sim.thetaRelease = sim.theta
@@ -3959,7 +4123,17 @@ export function GameCanvas({
         sim.pointer = null
         sim.mobileChargeViaControls = true
         const j = mobileJoystickVecRef.current
-        sim.theta = thetaFromNormalizedJoystick(sim.pivot, j.x, j.y)
+        const jm = Math.hypot(j.x, j.y)
+        if (jm >= MOBILE_JOYSTICK_DEADZONE) {
+          mobileLastNondeadJoyRef.current = { x: j.x, y: j.y }
+        } else {
+          mobileLastNondeadJoyRef.current = {
+            x: MOBILE_JOYSTICK_DEFAULT_PULL_X,
+            y: MOBILE_JOYSTICK_DEFAULT_PULL_Y,
+          }
+        }
+        const j0 = mobileLastNondeadJoyRef.current
+        sim.theta = thetaFromNormalizedJoystick(sim.pivot, j0.x, j0.y)
         sim.pCurrent = pullbackNormalizedFromVisualTheta(sim.theta)
       } else if (sim.phase === 'charging' && sim.mobileChargeViaControls) {
         /* Lift-to-swing: same as desktop mouse-up (commit or cancel via power deadzone). */
@@ -3973,9 +4147,17 @@ export function GameCanvas({
   const onJoystickOffset = useCallback(
     (x: number, y: number) => {
       mobileJoystickVecRef.current = { x, y }
+      const jm = Math.hypot(x, y)
+      if (jm >= MOBILE_JOYSTICK_DEADZONE) {
+        mobileLastNondeadJoyRef.current = { x, y }
+      }
       const sim = simRef.current
       if (sim?.phase === 'charging' && sim.mobileChargeViaControls) {
-        sim.theta = thetaFromNormalizedJoystick(sim.pivot, x, y)
+        const jUse =
+          jm >= MOBILE_JOYSTICK_DEADZONE
+            ? { x, y }
+            : mobileLastNondeadJoyRef.current
+        sim.theta = thetaFromNormalizedJoystick(sim.pivot, jUse.x, jUse.y)
         sim.pCurrent = pullbackNormalizedFromVisualTheta(sim.theta)
         draw()
       }
@@ -4262,8 +4444,6 @@ export function GameCanvas({
             variant={layout.isPortraitMobile ? 'portrait' : 'landscape'}
             onJoystickActiveChange={onJoystickActiveChange}
             onJoystickOffset={onJoystickOffset}
-            rapidFireEnabled={mobileRapidFire}
-            onRapidFireChange={setMobileRapidFire}
           />
         ) : null}
       </div>

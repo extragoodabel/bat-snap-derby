@@ -204,6 +204,72 @@ export function drawParachutePayloadSprite(
   )
 }
 
+/** Hit radius when using {@link drawParachutePayloadPlaceholder} (logical px scale). */
+export function parachutePlaceholderHitRadiusPx(
+  layoutScale: number,
+  screenScaleMul = 1
+): number {
+  const m = Math.max(1, screenScaleMul)
+  return Math.max(14, 38 * layoutScale * m)
+}
+
+/**
+ * Vector stand-in when `hotdog.webp` is missing — canopy + mustard dog; matches gameplay hit disc.
+ */
+export function drawParachutePayloadPlaceholder(
+  ctx: CanvasRenderingContext2D,
+  centerX: number,
+  centerY: number,
+  layoutScale: number,
+  screenScaleMul = 1
+): void {
+  const m = Math.max(1, screenScaleMul)
+  const sc = Math.max(0.35, layoutScale)
+  const W = 52 * sc * m
+  const H = 72 * sc * m
+
+  ctx.save()
+  ctx.translate(centerX, centerY)
+
+  ctx.strokeStyle = 'rgba(235, 205, 135, 0.9)'
+  ctx.fillStyle = 'rgba(255, 248, 225, 0.78)'
+  ctx.lineWidth = Math.max(1.25, 2 * sc)
+  ctx.beginPath()
+  ctx.moveTo(-W * 0.55, -H * 0.15)
+  ctx.quadraticCurveTo(0, -H * 0.52, W * 0.55, -H * 0.15)
+  ctx.quadraticCurveTo(0, H * 0.08, -W * 0.55, -H * 0.15)
+  ctx.closePath()
+  ctx.fill()
+  ctx.stroke()
+
+  ctx.strokeStyle = 'rgba(165, 155, 138, 0.8)'
+  ctx.lineWidth = Math.max(1, 1.35 * sc)
+  ctx.beginPath()
+  ctx.moveTo(-W * 0.32, -H * 0.12)
+  ctx.lineTo(-W * 0.18, H * 0.22)
+  ctx.moveTo(W * 0.32, -H * 0.12)
+  ctx.lineTo(W * 0.18, H * 0.22)
+  ctx.stroke()
+
+  ctx.fillStyle = 'rgba(205, 115, 58, 0.96)'
+  ctx.strokeStyle = 'rgba(115, 52, 28, 0.72)'
+  ctx.lineWidth = Math.max(1, 1.5 * sc)
+  ctx.beginPath()
+  ctx.roundRect(-W * 0.42, H * 0.18, W * 0.84, H * 0.14, H * 0.065)
+  ctx.fill()
+  ctx.stroke()
+
+  ctx.strokeStyle = 'rgba(255, 215, 72, 0.92)'
+  ctx.lineWidth = Math.max(1.5, 2.2 * sc)
+  ctx.lineCap = 'round'
+  ctx.beginPath()
+  ctx.moveTo(-W * 0.26, H * 0.26)
+  ctx.quadraticCurveTo(0, H * 0.36, W * 0.26, H * 0.24)
+  ctx.stroke()
+
+  ctx.restore()
+}
+
 /** Hit disc in logical px — sized from opaque footprint, clamped for feel. */
 export function cloudSpriteHitRadiusPx(
   canvasH: number,

@@ -7,21 +7,53 @@ import {
   measureOpaqueBounds,
   type OpaqueBounds,
 } from './spriteOpaqueBounds'
+import {
+  designPx,
+  PITCH_MOUND_NUDGE_UP_DESIGN,
+  type SceneLayout,
+} from './sceneLayout'
 
-/** Mound foot position (fraction of logical canvas). */
-export const PITCHER_ANCHOR_X_FR = 0.5
-export const PITCHER_ANCHOR_Y_FR = 0.64
+/** Matches incoming pitch spawn X (`pitchMoundScreenPoint`); mound centered with small nudge. */
+export const PITCH_MOUND_X_FR = 0.5
+/**
+ * Matches incoming pitch spawn Y baseline — lower band of playfield where mound reads in field art.
+ */
+export const PITCH_MOUND_Y_FR = 15 / 16
 
 /** Target max opaque silhouette height vs canvas height (uniform scale from this). */
 export const PITCHER_HEIGHT_FR = 0.17
 
 /** Move pitcher, shadow, and mound spawn together (−X left, +X right). */
 export const PITCHER_HORIZONTAL_GROUP_NUDGE_X_PX = -3
-/** Nudge after anchor + scale (logical canvas px): +X right, +Y down. */
-const PITCHER_OFFSET_X_PX = -26 + PITCHER_HORIZONTAL_GROUP_NUDGE_X_PX
-/** Move pitcher, shadow, and WebP release spawn together (+Y down, −Y up). */
+/** Move mound anchor + pitches together (+Y down, −Y up). */
 export const PITCHER_VERTICAL_GROUP_NUDGE_Y_PX = -48
-const PITCHER_OFFSET_Y_PX = 169 + PITCHER_VERTICAL_GROUP_NUDGE_Y_PX
+
+/** Extra placement vs painted mound (logical px): −X left, +Y down. */
+export const PITCHER_MOUND_FINE_NUDGE_X_PX = -5
+export const PITCHER_MOUND_FINE_NUDGE_Y_PX = 50
+
+/**
+ * Cleat / mound contact in logical canvas space — must match {@link pitchMoundScreenPoint}
+ * in GameCanvas (aside from per-pitch dy). Uses `designPx` so resize + aspect changes track
+ * the painted mound like incoming balls do.
+ */
+export function pitcherMoundAnchorScreen(
+  w: number,
+  h: number,
+  layout: SceneLayout
+): { x: number; y: number } {
+  return {
+    x:
+      w * PITCH_MOUND_X_FR +
+      PITCHER_HORIZONTAL_GROUP_NUDGE_X_PX +
+      PITCHER_MOUND_FINE_NUDGE_X_PX,
+    y:
+      h * PITCH_MOUND_Y_FR -
+      designPx(layout, PITCH_MOUND_NUDGE_UP_DESIGN) +
+      PITCHER_VERTICAL_GROUP_NUDGE_Y_PX +
+      PITCHER_MOUND_FINE_NUDGE_Y_PX,
+  }
+}
 
 /**
  * 18-step loop (0-based texture indices → mariano1…5). Long holds on M1 / M5 so the loop
@@ -170,6 +202,7 @@ export function timeToNextPitcherReleasePhase(simTime: number): number {
 export function getPitcherReleaseSpawnScreen(
   w: number,
   h: number,
+  layout: SceneLayout,
   pack: PitcherPack | null
 ): { x: number; y: number } | null {
   if (!pack || pack.frames.length <= PITCHER_RELEASE_TEXTURE_INDEX) return null
@@ -180,10 +213,9 @@ export function getPitcherReleaseSpawnScreen(
   const nh = img.naturalHeight
   if (nw < 1 || nh < 1) return null
   const scale = (h * PITCHER_HEIGHT_FR) / pack.refOpaqueHMax
-  const ax = w * PITCHER_ANCHOR_X_FR
-  const ay = h * PITCHER_ANCHOR_Y_FR
-  const dx = ax - pack.footNatX * scale + PITCHER_OFFSET_X_PX
-  const dy = ay - pack.footNatY * scale + PITCHER_OFFSET_Y_PX
+  const foot = pitcherMoundAnchorScreen(w, h, layout)
+  const dx = foot.x - pack.footNatX * scale
+  const dy = foot.y - pack.footNatY * scale
   const nx = (b.minX + b.maxX) * 0.5
   const ny = b.minY
   return { x: dx + nx * scale, y: dy + ny * scale }
@@ -267,11 +299,10 @@ function drawSyntheticPitcher(
   ctx: CanvasRenderingContext2D,
   w: number,
   h: number,
-  simTime: number
+  simTime: number,
+  layout: SceneLayout
 ): void {
   const fi = getPitcherFrameIndexAtTime(simTime)
-  const ax = w * PITCHER_ANCHOR_X_FR
-  const ay = h * PITCHER_ANCHOR_Y_FR
   const uh = h * PITCHER_HEIGHT_FR
   const bodyW = uh * 0.26
   const bodyH = uh * 0.52
@@ -279,8 +310,7 @@ function drawSyntheticPitcher(
   const armPhase = fi / 4
   const armAngle = -1.15 + armPhase * 0.95
 
-  const footX = ax + PITCHER_OFFSET_X_PX
-  const footY = ay + PITCHER_OFFSET_Y_PX
+  const { x: footX, y: footY } = pitcherMoundAnchorScreen(w, h, layout)
   drawPitcherGroundShadow(
     ctx,
     footX,
@@ -337,6 +367,7 @@ export function drawPitcher(
   w: number,
   h: number,
   simTime: number,
+  layout: SceneLayout,
   pack: PitcherPack | null,
   mode: PitcherAnimMode
 ): void {
@@ -353,7 +384,7 @@ export function drawPitcher(
         '[pitcher] Could not load all 5 WebP frames from /assets/pitcher/ — drawing placeholder. Expected names like mariano1.webp … mariano5.webp next to index (see pitcherAnimation.ts for alternates).'
       )
     }
-    drawSyntheticPitcher(ctx, w, h, simTime)
+    drawSyntheticPitcher(ctx, w, h, simTime, layout)
     return
   }
 
@@ -362,20 +393,16 @@ export function drawPitcher(
   const nw = img.naturalWidth
   const nh = img.naturalHeight
   if (nw < 1 || nh < 1) {
-    drawSyntheticPitcher(ctx, w, h, simTime)
+    drawSyntheticPitcher(ctx, w, h, simTime, layout)
     return
   }
 
   const scale = (h * PITCHER_HEIGHT_FR) / pack.refOpaqueHMax
   const dw = nw * scale
   const dh = nh * scale
-  const ax = w * PITCHER_ANCHOR_X_FR
-  const ay = h * PITCHER_ANCHOR_Y_FR
-  const dx = ax - pack.footNatX * scale + PITCHER_OFFSET_X_PX
-  const dy = ay - pack.footNatY * scale + PITCHER_OFFSET_Y_PX
-
-  const footX = ax + PITCHER_OFFSET_X_PX
-  const footY = ay + PITCHER_OFFSET_Y_PX
+  const { x: footX, y: footY } = pitcherMoundAnchorScreen(w, h, layout)
+  const dx = footX - pack.footNatX * scale
+  const dy = footY - pack.footNatY * scale
   const swMul = pitcherGroundShadowWidthMul(fi)
   drawPitcherGroundShadow(
     ctx,

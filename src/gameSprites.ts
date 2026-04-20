@@ -17,14 +17,18 @@ import {
  * Try lowercase then `.PNG` — deployment may be case-sensitive while macOS often is not.
  */
 const SPRITE_URL_CANDIDATES = {
-  /** Background: sky behind field (both WebP; design size 2048×1152). */
+  /**
+   * Legacy single sky (only if `public/assets/sky/sky1`…`sky4` all fail to load).
+   * Normal path: four crossfaded frames in {@link loadSkyFrames}.
+   */
   bgSky: [
     '/assets/bg-sky.webp',
     '/assets/bg-sky.WEBP',
     '/assets/bg-SKY.webp',
     '/assets/bg-SKY.WEBP',
   ],
-  bgField: [
+  /** Legacy full field if `assets/field/field1` + `field2` fail to load. */
+  bgFieldLegacy: [
     '/assets/bg-field.webp',
     '/assets/bg-field.WEBP',
     '/assets/bg-FIELD.webp',
@@ -46,8 +50,17 @@ const SPRITE_URL_CANDIDATES = {
 } as const
 
 export type LoadedGameSprites = {
-  bgSky: HTMLImageElement
-  bgField: HTMLImageElement
+  /** Four `contain`-sized sky layers; crossfaded in {@link drawBackgroundSkyLayer}. */
+  bgSkyFrames: HTMLImageElement[]
+  /**
+   * Four hill / midground frames drawn above sky, below Spacey + field; crossfaded in
+   * {@link drawBackgroundHillLayer}. Empty if `assets/hill/hill1`…`hill4` failed to load.
+   */
+  bgHillFrames: HTMLImageElement[]
+  /** Field base (`field2`); drawn first; Spacey sits above this, below {@link bgFieldFront}. */
+  bgFieldBack: HTMLImageElement
+  /** Field overlay (`field1`); drawn after Spacey. */
+  bgFieldFront: HTMLImageElement
   statue: HTMLImageElement
   bat: HTMLImageElement
   /** `null` if missing — game still runs. */
@@ -158,10 +171,78 @@ async function loadImageDecoded(urls: readonly string[]): Promise<HTMLImageEleme
   return im
 }
 
+const SKY_FRAME_CANDIDATES = [
+  ['/assets/sky/sky1.webp', '/assets/sky/sky1.WEBP'],
+  ['/assets/sky/sky2.webp', '/assets/sky/sky2.WEBP'],
+  ['/assets/sky/sky3.webp', '/assets/sky/sky3.WEBP'],
+  ['/assets/sky/sky4.webp', '/assets/sky/sky4.WEBP'],
+] as const
+
+/**
+ * Full crossfade cycle (seconds) through sky1→sky4 and back via blending sky4→sky1 —
+ * star positions differ slightly per frame so slow fades read as gentle twinkle.
+ */
+export const SKY_TWINKLE_CYCLE_SEC = 38
+
+const HILL_FRAME_CANDIDATES = [
+  ['/assets/hill/hill1.webp', '/assets/hill/hill1.WEBP'],
+  ['/assets/hill/hill2.webp', '/assets/hill/hill2.WEBP'],
+  ['/assets/hill/hill3.webp', '/assets/hill/hill3.WEBP'],
+  ['/assets/hill/hill4.webp', '/assets/hill/hill4.WEBP'],
+] as const
+
+/**
+ * Hill / city-lights crossfade period (seconds). Slightly offset from {@link SKY_TWINKLE_CYCLE_SEC}
+ * so the two layers do not pulse in lockstep.
+ */
+/** Lower = faster rotation through hill1→hill4 (full crossfade loop). Was 42s. */
+export const HILL_TWINKLE_CYCLE_SEC = 22
+
+async function loadHillFrames(): Promise<HTMLImageElement[]> {
+  try {
+    return await Promise.all(
+      HILL_FRAME_CANDIDATES.map((urls) => loadImageDecoded(urls))
+    )
+  } catch {
+    return []
+  }
+}
+
+async function loadSkyFrames(): Promise<HTMLImageElement[]> {
+  try {
+    return await Promise.all(
+      SKY_FRAME_CANDIDATES.map((urls) => loadImageDecoded(urls))
+    )
+  } catch {
+    const legacy = await loadImageDecoded(SPRITE_URL_CANDIDATES.bgSky)
+    return [legacy, legacy, legacy, legacy]
+  }
+}
+
+const FIELD_BACK_URLS = ['/assets/field/field2.webp', '/assets/field/field2.WEBP'] as const
+const FIELD_FRONT_URLS = ['/assets/field/field1.webp', '/assets/field/field1.WEBP'] as const
+
+async function loadFieldLayers(): Promise<{
+  bgFieldBack: HTMLImageElement
+  bgFieldFront: HTMLImageElement
+}> {
+  try {
+    const [bgFieldBack, bgFieldFront] = await Promise.all([
+      loadImageDecoded(FIELD_BACK_URLS),
+      loadImageDecoded(FIELD_FRONT_URLS),
+    ])
+    return { bgFieldBack, bgFieldFront }
+  } catch {
+    const legacy = await loadImageDecoded(SPRITE_URL_CANDIDATES.bgFieldLegacy)
+    return { bgFieldBack: legacy, bgFieldFront: legacy }
+  }
+}
+
 export async function loadGameSprites(): Promise<LoadedGameSprites> {
-  const [bgSky, bgField, statue, bat] = await Promise.all([
-    loadImageDecoded(SPRITE_URL_CANDIDATES.bgSky),
-    loadImageDecoded(SPRITE_URL_CANDIDATES.bgField),
+  const [bgSkyFrames, bgHillFrames, fieldLayers, statue, bat] = await Promise.all([
+    loadSkyFrames(),
+    loadHillFrames(),
+    loadFieldLayers(),
     loadImageDecoded(SPRITE_URL_CANDIDATES.statue),
     loadImageDecoded(SPRITE_URL_CANDIDATES.bat),
   ])
@@ -186,8 +267,10 @@ export async function loadGameSprites(): Promise<LoadedGameSprites> {
     /* optional */
   }
   return {
-    bgSky,
-    bgField,
+    bgSkyFrames,
+    bgHillFrames,
+    bgFieldBack: fieldLayers.bgFieldBack,
+    bgFieldFront: fieldLayers.bgFieldFront,
     statue,
     bat,
     stand,
@@ -435,22 +518,85 @@ function drawBackgroundContain(
   ctx.drawImage(im, dx, dy, dw, dh)
 }
 
+/** Shared `contain` crossfade for sky + hill multi-frame backgrounds. */
+function drawContainedCrossfadeFrames(
+  ctx: CanvasRenderingContext2D,
+  frames: HTMLImageElement[],
+  w: number,
+  h: number,
+  simTimeSec: number,
+  cycleSec: number
+): void {
+  const list = frames.filter((im) => im.naturalWidth > 0)
+  if (list.length === 0) return
+  if (list.length === 1) {
+    drawBackgroundContain(ctx, list[0], w, h)
+    return
+  }
+
+  const N = list.length
+  const cycle = cycleSec
+  const u = cycle > 1e-6 ? (simTimeSec % cycle) / cycle : 0
+  const phase = u * N
+  const i = Math.floor(phase) % N
+  const j = (i + 1) % N
+  const blend = phase - Math.floor(phase)
+
+  ctx.save()
+  ctx.globalAlpha = 1 - blend
+  drawBackgroundContain(ctx, list[i], w, h)
+  ctx.globalAlpha = blend
+  drawBackgroundContain(ctx, list[j], w, h)
+  ctx.restore()
+}
+
 /**
- * Sky only + void underfill. Call before mid-ground (e.g. Spacey), then
+ * Sky only + void underfill. Call before {@link drawBackgroundHillLayer}, Spacey, then
  * {@link drawBackgroundFieldLayer}.
+ *
+ * With multiple frames, slowly crossfades adjacent frames so star fields appear to twinkle.
  */
 export function drawBackgroundSkyLayer(
   ctx: CanvasRenderingContext2D,
-  bgSky: HTMLImageElement,
+  bgSkyFrames: HTMLImageElement[],
   w: number,
-  h: number
+  h: number,
+  simTimeSec: number
 ): void {
   ctx.fillStyle = STAGE_VOID_HEX
   ctx.fillRect(0, 0, w, h)
-  drawBackgroundContain(ctx, bgSky, w, h)
+  drawContainedCrossfadeFrames(
+    ctx,
+    bgSkyFrames,
+    w,
+    h,
+    simTimeSec,
+    SKY_TWINKLE_CYCLE_SEC
+  )
 }
 
-/** Field layer on top of sky / Spacey. */
+/**
+ * Hill / city-lights layer: composite above sky, same `contain` rect and crossfade timing
+ * as sky but does not clear the canvas (twinkle via frame differences).
+ */
+export function drawBackgroundHillLayer(
+  ctx: CanvasRenderingContext2D,
+  bgHillFrames: HTMLImageElement[],
+  w: number,
+  h: number,
+  simTimeSec: number
+): void {
+  drawContainedCrossfadeFrames(
+    ctx,
+    bgHillFrames,
+    w,
+    h,
+    simTimeSec,
+    HILL_TWINKLE_CYCLE_SEC
+  )
+}
+
+/** One parallax field `contain` layer (`field2` back or `field1` front). Spacey draws between them. */
 export function drawBackgroundFieldLayer(
   ctx: CanvasRenderingContext2D,
   bgField: HTMLImageElement,
@@ -461,18 +607,23 @@ export function drawBackgroundFieldLayer(
 }
 
 /**
- * Two background layers: sky (back) then field, each `contain`-scaled and centered
- * like `background-size: contain`. Letterbox/pillarbox bands use `STAGE_VOID_HEX`.
+ * Background stack without Spacey: sky → hill → field back → field front.
+ * Gameplay draws Spacey between back and front — see GameCanvas draw order.
  */
 export function drawBackgroundLayers(
   ctx: CanvasRenderingContext2D,
-  bgSky: HTMLImageElement,
-  bgField: HTMLImageElement,
+  bgSkyFrames: HTMLImageElement[],
+  bgHillFrames: HTMLImageElement[],
+  bgFieldBack: HTMLImageElement,
+  bgFieldFront: HTMLImageElement,
   w: number,
-  h: number
+  h: number,
+  simTimeSec: number
 ): void {
-  drawBackgroundSkyLayer(ctx, bgSky, w, h)
-  drawBackgroundFieldLayer(ctx, bgField, w, h)
+  drawBackgroundSkyLayer(ctx, bgSkyFrames, w, h, simTimeSec)
+  drawBackgroundHillLayer(ctx, bgHillFrames, w, h, simTimeSec)
+  drawBackgroundFieldLayer(ctx, bgFieldBack, w, h)
+  drawBackgroundFieldLayer(ctx, bgFieldFront, w, h)
 }
 
 export function drawStatueSprite(

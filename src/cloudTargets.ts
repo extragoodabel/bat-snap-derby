@@ -1,7 +1,7 @@
 /**
  * Floating cloud bonus targets (placeholder art when no WebP pack) +
- * parachute drops (`hotdog.webp` composite when loaded).
- * Drops only spawn when a cloud is hit and the hotdog asset is available.
+ * parachute drops: every cloud hit releases a hotdog-from-heaven (`hotdog.webp` when loaded,
+ * vector fallback otherwise).
  * Independent from spinning disc targets.
  */
 import { circlesOverlap, type Ball } from './physics'
@@ -11,8 +11,10 @@ import {
   cloudSpriteHitRadiusPx,
   drawCloudSpriteDrifting,
   drawCloudSpritePopping,
+  drawParachutePayloadPlaceholder,
   drawParachutePayloadSprite,
   hotdogSpriteHitRadiusPx,
+  parachutePlaceholderHitRadiusPx,
   type CloudTargetPack,
 } from './cloudSprites'
 
@@ -32,6 +34,9 @@ export const CLOUD_SPEED_MAX = 54
  */
 export const CLOUD_TOP_BAND_MIN_Y = 0.14
 export const CLOUD_TOP_BAND_MAX_Y = 0.24
+
+/** Logical px: moves clouds (+drops spawned from hits) upward on screen (−Y). */
+export const CLOUD_LAYER_NUDGE_Y = -30
 
 export const CLOUD_BOB_AMPLITUDE = 7
 export const CLOUD_BOB_SPEED = 1.05
@@ -111,6 +116,7 @@ function nextCloudSpawnDelay(): number {
 
 export function cloudWorldY(simTime: number, c: CloudTarget): number {
   return (
+    CLOUD_LAYER_NUDGE_Y +
     c.yAnchor +
     Math.sin(simTime * CLOUD_BOB_SPEED + c.bobPhase) * CLOUD_BOB_AMPLITUDE
   )
@@ -227,7 +233,7 @@ export function applyFloatingTargetHitsForBall(
   const payloadHitR =
     hdHit != null
       ? hotdogSpriteHitRadiusPx(sim.h, hdHit.bounds, s, cloudScreenScaleMul)
-      : 0
+      : parachutePlaceholderHitRadiusPx(s, cloudScreenScaleMul)
 
   for (let j = sim.parachutePayloads.length - 1; j >= 0; j--) {
     const p = sim.parachutePayloads[j]
@@ -255,11 +261,7 @@ export function applyFloatingTargetHitsForBall(
       c.popRemain = CLOUD_POP_DURATION
       const mulC = Math.max(1, sim.scorePointMultiplier)
       sim.score += Math.round(CLOUD_TARGET_POINTS * mulC)
-      /* Composite chute+dog sprite only (no vector fallback). */
-      if (
-        cloudPack?.hotdog != null &&
-        sim.parachutePayloads.length < MAX_PARACHUTES
-      ) {
+      if (sim.parachutePayloads.length < MAX_PARACHUTES) {
         sim.parachutePayloads.push({
           id: sim.nextFloatingTargetId++,
           x: c.x,
@@ -356,9 +358,9 @@ export function drawFloatingCloudLayer(
   }
 
   const hd = cloudPack?.hotdog ?? null
-  if (hd != null) {
-    for (const p of sim.parachutePayloads) {
-      if (!p.alive) continue
+  for (const p of sim.parachutePayloads) {
+    if (!p.alive) continue
+    if (hd != null) {
       drawParachutePayloadSprite(
         ctx,
         p.x,
@@ -368,6 +370,8 @@ export function drawFloatingCloudLayer(
         s,
         cloudScreenScaleMul
       )
+    } else {
+      drawParachutePayloadPlaceholder(ctx, p.x, p.y, s, cloudScreenScaleMul)
     }
   }
 }

@@ -8,8 +8,6 @@ type MobileArcadeControlsProps = {
   onJoystickActiveChange: (active: boolean) => void
   /** Normalized stick offset from knob center, roughly −1…1 (clamped). */
   onJoystickOffset: (x: number, y: number) => void
-  rapidFireEnabled: boolean
-  onRapidFireChange: (enabled: boolean) => void
 }
 
 const KNOB_MAX_PX = 26
@@ -18,8 +16,6 @@ export function MobileArcadeControls({
   variant,
   onJoystickActiveChange,
   onJoystickOffset,
-  rapidFireEnabled,
-  onRapidFireChange,
 }: MobileArcadeControlsProps) {
   const baseRef = useRef<HTMLDivElement>(null)
   const stickRef = useRef<HTMLDivElement>(null)
@@ -96,7 +92,7 @@ export function MobileArcadeControls({
       data-variant={variant}
     >
       <div className="mobile-arcade-controls__main">
-        <div className="mobile-arcade-controls__cluster mobile-arcade-controls__cluster--left">
+        <div className="mobile-arcade-controls__cluster mobile-arcade-controls__cluster--solo">
           <div
             ref={baseRef}
             className="mobile-joystick"
@@ -111,22 +107,11 @@ export function MobileArcadeControls({
           </div>
           <span className="mobile-joystick__caption">Swing bat</span>
         </div>
-
-        <div className="mobile-arcade-controls__cluster mobile-arcade-controls__cluster--right">
-          <label className="mobile-rapid">
-            <input
-              type="checkbox"
-              checked={rapidFireEnabled}
-              onChange={(ev) => onRapidFireChange(ev.target.checked)}
-            />
-            <span>Rapid demo swings</span>
-          </label>
-        </div>
       </div>
 
       <p className="mobile-arcade-controls__howto">
-        Drag the pad to pull the bat back, then <strong>lift your finger</strong> to swing
-        (same as mouse on desktop).
+        Drag to pull the bat back, then <strong>release</strong> to swing (same as mouse on
+        desktop).
       </p>
     </div>
   )

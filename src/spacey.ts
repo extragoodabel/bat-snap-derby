@@ -1,9 +1,9 @@
 /**
- * Spacey bonus target: drawn between sky and field (behind field art). Pops up periodically.
+ * Spacey bonus target: drawn between field2 and field1 (behind `field1`). Pops up periodically.
  * Hit → all scoring ×2 for {@link SPACEY_DOUBLE_SEC} seconds.
  */
 import { circlesOverlap, type Ball } from './physics'
-import { designPx, type SceneLayout } from './sceneLayout'
+import { designPx, DESIGN_REF_W, type SceneLayout } from './sceneLayout'
 
 export const SPACEY_DOUBLE_SEC = 30
 export const SPACEY_ANNOUNCE_SEC = 3.4
@@ -11,6 +11,21 @@ export const SPACEY_ANNOUNCE_SEC = 3.4
 export const SPACEY_CELEBRATE_SEC = 2.45
 
 export type SpaceyPhase = 'wait' | 'rise' | 'hold' | 'celebrate' | 'lower'
+
+/**
+ * Field `field1` scoreboard pocket (design px on 2048-wide art): horizontal band for spawns.
+ * Scales with logical canvas width so resize stays aligned with painted board.
+ */
+const SPACEY_FIELD_SPAWN_X_MIN_FR = 400 / DESIGN_REF_W
+const SPACEY_FIELD_SPAWN_X_MAX_FR = 1100 / DESIGN_REF_W
+/**
+ * Vertical anchor (sprite center at full emerge): upper band so the figure reads above the
+ * painted scoreboard; bottom stays occluded by `field1` (same hide-drop as other spawns).
+ */
+const SPACEY_FIELD_ANCHOR_Y_MIN_FR = 0.14
+const SPACEY_FIELD_ANCHOR_Y_MAX_FR = 0.27
+/** Hide-drop scale vs right spawn — tune if feet read too high/low behind field1. */
+const SPACEY_FIELD_HIDE_DROP_MUL = 1
 
 /**
  * Right-side Spacey: fixed anchor. Left: only in the stadium “gap” band; random tilt
@@ -96,9 +111,28 @@ function clampLeftSpaceyBaseX(sim: SpaceySimFields): void {
 }
 
 function pickSpaceySpawn(sim: SpaceySimFields): void {
-  /** Alternate left / right so the left pocket reliably appears (pure 50% RNG can streak). */
-  const leftGap = sim.spaceySpawnCycle % 2 === 0
   sim.spaceySpawnCycle += 1
+  const u = Math.random()
+
+  /** Occasional spawn into the painted scoreboard strip on `field1` (x ~400–1100 @ 2048 ref). */
+  if (u < 1 / 3) {
+    sim.spaceySpawnIsFieldScoreboard = true
+    sim.spaceySpawnIsLeft = false
+    sim.spaceyNudgeX = 0
+    sim.spaceyAnchorXFr = randRange(
+      SPACEY_FIELD_SPAWN_X_MIN_FR,
+      SPACEY_FIELD_SPAWN_X_MAX_FR
+    )
+    sim.spaceyAnchorYFr = randRange(
+      SPACEY_FIELD_ANCHOR_Y_MIN_FR,
+      SPACEY_FIELD_ANCHOR_Y_MAX_FR
+    )
+    sim.spaceyPeekRad = randRange(-0.14, 0.14)
+    return
+  }
+
+  const leftGap = u < 2 / 3
+  sim.spaceySpawnIsFieldScoreboard = false
   if (leftGap) {
     sim.spaceySpawnIsLeft = true
     sim.spaceyAnchorXFr = randRange(
@@ -222,11 +256,13 @@ export type SpaceySimFields = {
   spaceyNudgeX: number
   /** True when this popup uses the left gap (peek rotation). */
   spaceySpawnIsLeft: boolean
+  /** Upper `field1` scoreboard strip (design-tied X band); bottom occluded by `field1`. */
+  spaceySpawnIsFieldScoreboard: boolean
   /** Rotation (rad) around sprite center; left spawns only. */
   spaceyPeekRad: number
   /** Post-hit celebration time before lowering (`celebrate` phase). */
   spaceyCelebrateRemain: number
-  /** Increments each spawn; even → left pocket, odd → right (see `pickSpaceySpawn`). */
+  /** Increments each spawn (legacy / debug). */
   spaceySpawnCycle: number
   allPointsDoubleRemainSec: number
   allPointsDoubleAnnounceRemainSec: number
@@ -242,6 +278,7 @@ export function initSpacey(sim: SpaceySimFields): void {
   sim.spaceyAnchorYFr = SPACEY_RIGHT_ANCHOR_Y_FR
   sim.spaceyNudgeX = SPACEY_RIGHT_NUDGE_X_PX
   sim.spaceySpawnIsLeft = false
+  sim.spaceySpawnIsFieldScoreboard = false
   sim.spaceyPeekRad = 0
   sim.spaceyCelebrateRemain = 0
   sim.spaceySpawnCycle = 0
@@ -258,6 +295,8 @@ export function spaceyScreenCenter(sim: SpaceySimFields): { x: number; y: number
     designPx(sim.sceneLayout, SPACEY_HIDE_DROP_DESIGN) * (1 - sim.spaceyEmerge01)
   if (sim.spaceySpawnIsLeft) {
     drop *= SPACEY_LEFT_HIDE_DROP_MUL
+  } else if (sim.spaceySpawnIsFieldScoreboard) {
+    drop *= SPACEY_FIELD_HIDE_DROP_MUL
   }
   return { x: bx, y: byVisible + drop }
 }

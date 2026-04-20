@@ -16,11 +16,15 @@
    * Total frame thickness OUTSIDE the logical canvas (L+R and T+B),
    * kept in sync with .game-cabinet__* padding. Used in JS when sizing canvas.
    */
-  /* Sum of L+R / T+B padding + navy top border (3px): must match GameCanvas frame budget. */
-  --playfield-frame-total-x: 76px;
-  --playfield-frame-total-y: 79px;
+  /*
+   * Sum of L+R / T+B: navy padding×2 + teal + silver + stage + navy border×2 (red ring).
+   * Must match GameCanvas readPlayfieldFrameBudgetPx fallbacks.
+   */
+  --playfield-frame-total-x: 44px;
+  --playfield-frame-total-y: 44px;
   /** Extra vertical budget reserved under the logical canvas on portrait phones. */
   --mobile-portrait-controls-reserved: 0px;
+  --mobile-landscape-controls-reserved: 0px;
 }
 
 /*
@@ -30,13 +34,18 @@
 [data-game-layout='mobile-landscape'],
 [data-game-layout='mobile-portrait'] {
   --page-pad: clamp(3px, 1.2vmin, 8px);
-  --playfield-frame-total-x: 28px;
-  --playfield-frame-total-y: 31px;
+  --playfield-frame-total-x: 22px;
+  --playfield-frame-total-y: 22px;
 }
 
 [data-game-layout='mobile-portrait'] {
   /* Band under canvas: joystick + swing + short how-to copy */
   --mobile-portrait-controls-reserved: 132px;
+}
+
+[data-game-layout='mobile-landscape'] {
+  /* Bar below canvas so controls never sit on top of the playfield / pitcher */
+  --mobile-landscape-controls-reserved: 108px;
 }
 
 [data-game-layout^='mobile'] .app-page {
@@ -73,26 +82,24 @@
 }
 
 [data-game-layout^='mobile'] .game-cabinet__navy {
-  padding: 5px;
-  border-radius: 9px;
-  border-top-width: 2px;
+  padding: 3px;
+  border-radius: 8px;
+  border: 2px solid var(--m-red);
 }
 
 [data-game-layout^='mobile'] .game-cabinet__teal {
-  padding: 3px;
-  border-radius: 7px;
+  padding: 2px;
+  border-radius: 6px;
 }
 
 [data-game-layout^='mobile'] .game-cabinet__silver {
-  padding: 2px;
+  padding: 1px;
   border-radius: 5px;
 }
 
 [data-game-layout^='mobile'] .game-cabinet__stage {
-  padding: 4px;
-  border-radius: 4px;
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.32),
-    inset 0 6px 14px rgba(0, 0, 0, 0.18);
+  padding: 3px;
+  border-radius: 3px;
 }
 
 /* Dev host is not mounted on mobile; keep a guard for stray markup. */
@@ -178,30 +185,14 @@
   min-width: 0;
 }
 
-.game-canvas-shell--mobile.game-canvas-shell--portrait .mobile-arcade-controls {
-  position: relative;
+/* Controls sit in a dedicated band under the board (portrait + landscape phones). */
+.game-canvas-shell--mobile .game-canvas-shell__board {
   flex: 0 0 auto;
 }
 
-.game-canvas-shell--mobile:not(.game-canvas-shell--portrait) .mobile-arcade-controls {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-
-/*
- * Let touches reach the canvas except on real controls. Previously `__main` had
- * `pointer-events: auto` (via `> *`), so the full-width bottom bar swallowed all taps
- * on the field — sim / draw never “saw” play, so pitcher & pitches looked broken.
- */
-.game-canvas-shell--mobile:not(.game-canvas-shell--portrait)
-  .mobile-arcade-controls__main {
-  pointer-events: none;
-}
-
-.game-canvas-shell--mobile:not(.game-canvas-shell--portrait)
-  .mobile-arcade-controls__cluster {
-  pointer-events: auto;
+.game-canvas-shell--mobile .mobile-arcade-controls {
+  position: relative;
+  flex: 0 0 auto;
 }
 
 .mobile-arcade-controls {
@@ -222,7 +213,7 @@
   display: flex;
   flex-direction: row;
   align-items: flex-end;
-  justify-content: space-between;
+  justify-content: center;
   gap: 12px;
   width: 100%;
 }
@@ -242,7 +233,8 @@
 }
 
 .mobile-arcade-controls--landscape .mobile-arcade-controls__howto {
-  display: none;
+  font-size: 10px;
+  padding-bottom: 2px;
 }
 
 .mobile-arcade-controls--portrait {
@@ -260,9 +252,16 @@
 
 .mobile-arcade-controls--landscape {
   width: 100%;
-  height: 100%;
-  padding: 0 8px max(10px, env(safe-area-inset-bottom, 0px));
+  min-height: calc(var(--mobile-landscape-controls-reserved, 108px) - 6px);
+  padding: 6px 10px max(8px, env(safe-area-inset-bottom, 0px));
   justify-content: flex-end;
+  background: linear-gradient(
+    180deg,
+    rgba(6, 10, 18, 0) 0%,
+    rgba(8, 18, 32, 0.88) 42%,
+    rgba(6, 12, 22, 0.96) 100%
+  );
+  border-top: 1px solid rgba(0, 92, 92, 0.4);
 }
 
 .mobile-arcade-controls__cluster {
@@ -272,13 +271,9 @@
   gap: 6px;
 }
 
-.mobile-arcade-controls__cluster--left {
-  align-self: flex-end;
-}
-
-.mobile-arcade-controls__cluster--right {
-  align-self: flex-end;
-  align-items: flex-end;
+.mobile-arcade-controls__cluster--solo {
+  align-self: center;
+  align-items: center;
 }
 
 .mobile-joystick {
@@ -329,29 +324,6 @@
   border: 2px solid rgba(12, 44, 86, 0.55);
   box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4);
   pointer-events: none;
-}
-
-.mobile-rapid {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 0;
-  padding: 8px 6px;
-  min-height: 44px;
-  box-sizing: border-box;
-  font: 600 11px/1.2 system-ui, sans-serif;
-  letter-spacing: 0.02em;
-  color: rgba(220, 235, 245, 0.92);
-  user-select: none;
-  border-radius: 10px;
-  cursor: pointer;
-}
-
-.mobile-rapid input {
-  accent-color: #d50032;
-  width: 20px;
-  height: 20px;
-  flex-shrink: 0;
 }
 
 @keyframes rotate-play-hint-spin {
@@ -456,7 +428,10 @@ body {
   z-index: 0;
 }
 
-/* Collapsed: hugs the ▶ Dev control only; expanded: room for the panel (see App.tsx). */
+/*
+ * Collapsed: only as wide as the ▶ Dev control — do not reserve expanded panel width.
+ * Open: fixed panel width. When closed, game column must reclaim space (ResizeObserver on column).
+ */
 .game-dev-aside {
   flex: 0 0 auto;
   width: max-content;
@@ -465,10 +440,16 @@ body {
   max-height: 100%;
   overflow: auto;
   padding-top: 2px;
+  box-sizing: border-box;
+}
+
+.game-dev-aside:not(.game-dev-aside--open) {
+  width: max-content;
 }
 
 .game-dev-aside--open {
   width: min(280px, 38vw);
+  min-width: min(280px, 38vw);
 }
 
 .game-launcher-hud-pre {
@@ -503,10 +484,10 @@ body {
   flex-direction: column;
   width: fit-content;
   height: fit-content;
-  padding: 14px;
+  padding: 8px;
   background: var(--m-navy);
-  border-radius: 14px;
-  border-top: 3px solid var(--m-red);
+  border-radius: 11px;
+  border: 2px solid var(--m-red);
   box-shadow: inset 0 1px 0 rgba(196, 206, 212, 0.08);
 }
 
@@ -515,8 +496,8 @@ body {
   flex-direction: column;
   width: fit-content;
   height: fit-content;
-  border-radius: 10px;
-  padding: 8px;
+  border-radius: 8px;
+  padding: 5px;
   background: linear-gradient(
     180deg,
     rgba(0, 110, 110, 0.95) 0%,
@@ -531,8 +512,8 @@ body {
   flex-direction: column;
   width: fit-content;
   height: fit-content;
-  border-radius: 8px;
-  padding: 4px;
+  border-radius: 6px;
+  padding: 2px;
   background: linear-gradient(
     145deg,
     rgba(196, 206, 212, 0.55) 0%,
@@ -548,10 +529,9 @@ body {
   width: fit-content;
   height: fit-content;
   position: relative;
-  padding: 12px;
+  padding: 5px;
   margin: 0;
-  background: var(--stage-void);
-  border-radius: 5px;
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35),
-    inset 0 10px 24px rgba(0, 0, 0, 0.2);
+  /* No dark inset “picture frame”; canvas paints its own void under the playfield. */
+  background: transparent;
+  border-radius: 4px;
 }

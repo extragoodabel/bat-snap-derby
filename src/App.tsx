@@ -11,7 +11,7 @@ function App() {
     <div className="app-page">
       {layout.isPortraitMobile ? <RotatePlayHint /> : null}
       <div className="app-page__row">
-        <div className="app-page__game-column">
+        <div className="app-page__game-column" id="game-fit-column">
           {/* Fit probe: same box the framed cabinet must fit in (excludes dev aside). */}
           <div
             id="game-max-fit-rect"
