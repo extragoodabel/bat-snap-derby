@@ -4,6 +4,11 @@
  */
 import { circlesOverlap, type Ball } from './physics'
 import { designPx, DESIGN_REF_W, type SceneLayout } from './sceneLayout'
+import {
+  drawSpaceyOrangeRadialHalo,
+  SPACEY_ORANGE_GLOW_SHADOW,
+  spaceySpriteShadowBlurPx,
+} from './targetSpriteGlow'
 
 export const SPACEY_DOUBLE_SEC = 30
 export const SPACEY_ANNOUNCE_SEC = 3.4
@@ -75,7 +80,8 @@ const SPACEY_SIGN_LY_FR = -0.11
 const SPACEY_SIGN_R_FR = 0.068
 
 const SPACEY_RISE_SEC = 0.4
-const SPACEY_HOLD_SEC = 2.35
+/** Full-emerge plateau: 2× previous so Spacey stays on screen twice as long before lowering. */
+const SPACEY_HOLD_SEC = 4.7
 const SPACEY_LOWER_SEC = 0.38
 const SPACEY_WAIT_MIN = 4.5
 const SPACEY_WAIT_MAX = 10.5
@@ -426,14 +432,21 @@ export function drawSpacey(
   const { cx, cy, w, h } = lay
   const flashOn =
     celebrating && Math.floor(sim.simTime * 15) % 2 === 0
+  const emergeA = 0.08 + 0.92 * sim.spaceyEmerge01
+
+  drawSpaceyOrangeRadialHalo(ctx, cx, cy, Math.max(w, h) * 0.44, emergeA)
 
   ctx.save()
   ctx.translate(cx, cy)
   ctx.rotate(sim.spaceyPeekRad)
-  ctx.globalAlpha = 0.08 + 0.92 * sim.spaceyEmerge01
+  ctx.globalAlpha = emergeA
   if (flashOn) {
     ctx.filter = 'brightness(1.75) saturate(1.15)'
   }
+  ctx.shadowColor = SPACEY_ORANGE_GLOW_SHADOW
+  ctx.shadowBlur = spaceySpriteShadowBlurPx(Math.max(w, h))
+  ctx.shadowOffsetX = 0
+  ctx.shadowOffsetY = 0
   ctx.drawImage(drawImg, -w / 2, -h / 2, w, h)
   ctx.restore()
 }

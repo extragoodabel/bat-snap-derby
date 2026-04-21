@@ -86,3 +86,13 @@ export const MOOSE_TARGET_TEX_ANCHOR_X_FR = 2251 / 2732
 export const MOOSE_TARGET_TEX_ANCHOR_Y_FR = 639 / 2048
 /** Red circle radius as a fraction of sprite natural width (247.5px @ 2732×2048 source). */
 export const MOOSE_TARGET_TEX_RADIUS_FR_OF_NAT_W = 247.5 / 2732
+
+/**
+ * Middle ring salmon targets (`public/assets/salmon/salmon1.webp` … `salmon4.webp`, 2048×2732).
+ * Anchor = center of the round **sign** the salmon holds (hittable zone matches disc peg).
+ * Tune if art shifts; keep all four sprites aligned to the same sign layout for one scale.
+ */
+export const SALMON_TARGET_TEX_ANCHOR_X_FR = 1024 / 2048
+export const SALMON_TARGET_TEX_ANCHOR_Y_FR = 620 / 2732
+/** Sign radius ÷ natural width — match on-screen radius to `targetR` like {@link MOOSE_TARGET_TEX_RADIUS_FR_OF_NAT_W}. */
+export const SALMON_TARGET_TEX_RADIUS_FR_OF_NAT_W = 200 / 2048

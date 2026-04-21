@@ -198,6 +198,24 @@ const HILL_FRAME_CANDIDATES = [
 /** Lower = faster rotation through hill1→hill4 (full crossfade loop). Was 42s. */
 export const HILL_TWINKLE_CYCLE_SEC = 22
 
+/**
+ * Within each sky/hill frame segment of the cycle, this fraction of the segment keeps the
+ * **current** frame at full opacity before linearly crossfading to the next. The rest of the
+ * segment is the blend (so stars/city lights get a clear “peak” before the next layer appears).
+ * `0` reproduces the old always-overlapping crossfade; `~0.5` is a balanced hold + blend.
+ */
+const BACKGROUND_CROSSFADE_HOLD_FRAC = 0.52
+
+/** `t` = fractional position in one frame→frame segment [0,1). Returns alphas for [current, next]. */
+function segmentAlphasHoldThenCrossfade(t: number, holdFrac: number): [number, number] {
+  const h = Math.min(Math.max(holdFrac, 0), 0.985)
+  if (t < h) {
+    return [1, 0]
+  }
+  const u = (t - h) / (1 - h)
+  return [1 - u, u]
+}
+
 async function loadHillFrames(): Promise<HTMLImageElement[]> {
   try {
     return await Promise.all(
@@ -540,12 +558,13 @@ function drawContainedCrossfadeFrames(
   const phase = u * N
   const i = Math.floor(phase) % N
   const j = (i + 1) % N
-  const blend = phase - Math.floor(phase)
+  const t = phase - Math.floor(phase)
+  const [a0, a1] = segmentAlphasHoldThenCrossfade(t, BACKGROUND_CROSSFADE_HOLD_FRAC)
 
   ctx.save()
-  ctx.globalAlpha = 1 - blend
+  ctx.globalAlpha = a0
   drawBackgroundContain(ctx, list[i], w, h)
-  ctx.globalAlpha = blend
+  ctx.globalAlpha = a1
   drawBackgroundContain(ctx, list[j], w, h)
   ctx.restore()
 }
@@ -554,7 +573,8 @@ function drawContainedCrossfadeFrames(
  * Sky only + void underfill. Call before {@link drawBackgroundHillLayer}, Spacey, then
  * {@link drawBackgroundFieldLayer}.
  *
- * With multiple frames, slowly crossfades adjacent frames so star fields appear to twinkle.
+ * With multiple frames, each star field holds near full strength, then slowly crossfades so
+ * positions read as gentle twinkle without perpetual mid-blend muddiness.
  */
 export function drawBackgroundSkyLayer(
   ctx: CanvasRenderingContext2D,
@@ -576,8 +596,8 @@ export function drawBackgroundSkyLayer(
 }
 
 /**
- * Hill / city-lights layer: composite above sky, same `contain` rect and crossfade timing
- * as sky but does not clear the canvas (twinkle via frame differences).
+ * Hill / city-lights layer: composite above sky, same `contain` rect and hold-then-crossfade
+ * timing as sky but does not clear the canvas (variation via frame differences).
  */
 export function drawBackgroundHillLayer(
   ctx: CanvasRenderingContext2D,

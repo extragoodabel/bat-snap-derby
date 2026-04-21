@@ -1,77 +1,81 @@
-import { useCallback, useRef } from 'react'
+import { useCallback, useRef, useState } from 'react'
 
 export type MobileControlsVariant = 'landscape' | 'portrait'
 
 type MobileArcadeControlsProps = {
   variant: MobileControlsVariant
-  /** Finger down on joystick base (start / continue charge). */
-  onJoystickActiveChange: (active: boolean) => void
-  /** Normalized stick offset from knob center, roughly −1…1 (clamped). */
-  onJoystickOffset: (x: number, y: number) => void
+  /** Finger down on bat trigger (start / continue charge). */
+  onBatTriggerActiveChange: (active: boolean) => void
+  /** Normalized pullback 0…1 along the 45° rightward load arc (maps to sim power + θ). */
+  onBatPull01Change: (u: number) => void
 }
 
-const KNOB_MAX_PX = 26
+/** Same angular window as GameCanvas `MOBILE_PULLBACK_ARC_RAD` (45° toward the plate). */
+const PULL_ANGLE_MIN = -Math.PI / 2
+const PULL_ANGLE_MAX = -Math.PI / 2 + Math.PI / 4
+
+function pull01FromPointer(
+  pivotCx: number,
+  pivotCy: number,
+  clientX: number,
+  clientY: number
+): number {
+  const ang = Math.atan2(clientY - pivotCy, clientX - pivotCx)
+  const a = Math.max(PULL_ANGLE_MIN, Math.min(PULL_ANGLE_MAX, ang))
+  return (a - PULL_ANGLE_MIN) / (PULL_ANGLE_MAX - PULL_ANGLE_MIN)
+}
+
+/** Visual rotation mirrors the 45° sim load arc (rest → full pullback). */
+const BAT_REST_DEG = -12
+const BAT_LOAD_EXTRA_DEG = 38
 
 export function MobileArcadeControls({
   variant,
-  onJoystickActiveChange,
-  onJoystickOffset,
+  onBatTriggerActiveChange,
+  onBatPull01Change,
 }: MobileArcadeControlsProps) {
-  const baseRef = useRef<HTMLDivElement>(null)
-  const stickRef = useRef<HTMLDivElement>(null)
+  const zoneRef = useRef<HTMLDivElement>(null)
   const draggingRef = useRef(false)
+  const [pull01Display, setPull01Display] = useState(0)
 
-  const setStickPx = useCallback(
-    (dx: number, dy: number) => {
-      const el = stickRef.current
-      if (!el) return
-      const mx = Math.max(-KNOB_MAX_PX, Math.min(KNOB_MAX_PX, dx))
-      const my = Math.max(-KNOB_MAX_PX, Math.min(KNOB_MAX_PX, dy))
-      el.style.transform = `translate(calc(-50% + ${mx}px), calc(-50% + ${my}px))`
-      const nx = mx / KNOB_MAX_PX
-      const ny = my / KNOB_MAX_PX
-      onJoystickOffset(nx, ny)
+  const updatePull = useCallback(
+    (clientX: number, clientY: number) => {
+      const z = zoneRef.current
+      if (!z) return
+      const r = z.getBoundingClientRect()
+      const cx = r.left + r.width * 0.5
+      const cy = r.bottom - Math.min(18, r.height * 0.12)
+      const u = pull01FromPointer(cx, cy, clientX, clientY)
+      setPull01Display(u)
+      onBatPull01Change(u)
     },
-    [onJoystickOffset]
+    [onBatPull01Change]
   )
 
-  const resetStickVisual = useCallback(() => {
-    const el = stickRef.current
-    if (el) el.style.transform = 'translate(-50%, -50%)'
-    onJoystickOffset(0, 0)
-  }, [onJoystickOffset])
-
-  const onJoystickPointerDown = useCallback(
+  const onPointerDown = useCallback(
     (e: React.PointerEvent) => {
       e.preventDefault()
       e.stopPropagation()
-      const base = baseRef.current
-      if (!base) return
-      base.setPointerCapture(e.pointerId)
+      const z = zoneRef.current
+      if (!z) return
+      z.setPointerCapture(e.pointerId)
       draggingRef.current = true
-      const r = base.getBoundingClientRect()
-      const cx = r.left + r.width / 2
-      const cy = r.top + r.height / 2
-      setStickPx(e.clientX - cx, e.clientY - cy)
-      onJoystickActiveChange(true)
+      onBatTriggerActiveChange(true)
+      setPull01Display(0)
+      updatePull(e.clientX, e.clientY)
     },
-    [onJoystickActiveChange, setStickPx]
+    [onBatTriggerActiveChange, updatePull]
   )
 
-  const onJoystickPointerMove = useCallback(
+  const onPointerMove = useCallback(
     (e: React.PointerEvent) => {
       if (!draggingRef.current) return
-      const base = baseRef.current
-      if (!base) return
-      const r = base.getBoundingClientRect()
-      const cx = r.left + r.width / 2
-      const cy = r.top + r.height / 2
-      setStickPx(e.clientX - cx, e.clientY - cy)
+      updatePull(e.clientX, e.clientY)
     },
-    [setStickPx]
+    [updatePull]
   )
 
-  const finishJoystick = useCallback(
+  const finish = useCallback(
     (e: React.PointerEvent) => {
       if (!draggingRef.current) return
       draggingRef.current = false
@@ -80,39 +84,86 @@ export function MobileArcadeControls({
       } catch {
         /* ignore */
       }
-      onJoystickActiveChange(false)
-      resetStickVisual()
+      onBatTriggerActiveChange(false)
+      setPull01Display(0)
     },
-    [onJoystickActiveChange, resetStickVisual]
+    [onBatTriggerActiveChange]
   )
 
   return (
     <div
-      className={`mobile-arcade-controls mobile-arcade-controls--${variant}`}
+      className={`mobile-bat-trigger-panel mobile-bat-trigger-panel--${variant}`}
       data-variant={variant}
     >
-      <div className="mobile-arcade-controls__main">
-        <div className="mobile-arcade-controls__cluster mobile-arcade-controls__cluster--solo">
-          <div
-            ref={baseRef}
-            className="mobile-joystick"
-            onPointerDown={onJoystickPointerDown}
-            onPointerMove={onJoystickPointerMove}
-            onPointerUp={finishJoystick}
-            onPointerCancel={finishJoystick}
-            onLostPointerCapture={finishJoystick}
+      <div
+        ref={zoneRef}
+        className="mobile-bat-trigger"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={finish}
+        onPointerCancel={finish}
+        onLostPointerCapture={finish}
+      >
+        <div className="mobile-bat-trigger__rail" aria-hidden="true">
+          <svg
+            className="mobile-bat-trigger__arc-svg"
+            viewBox="0 0 120 72"
+            preserveAspectRatio="xMidYMax meet"
           >
-            <div className="mobile-joystick__bezel" />
-            <div ref={stickRef} className="mobile-joystick__knob" />
-          </div>
-          <span className="mobile-joystick__caption">Swing bat</span>
+            <path
+              d="M 12 60 A 52 52 0 0 1 92 22"
+              fill="none"
+              stroke="rgba(196, 206, 212, 0.35)"
+              strokeWidth="3"
+              strokeLinecap="round"
+            />
+          </svg>
         </div>
+        <div
+          className="mobile-bat-trigger__bat-wrap"
+          style={{
+            transform: `rotate(${BAT_REST_DEG + pull01Display * BAT_LOAD_EXTRA_DEG}deg)`,
+          }}
+        >
+          <img
+            className="mobile-bat-trigger__bat-img"
+            src="/assets/bat.webp"
+            alt=""
+            draggable={false}
+          />
+          <div className="mobile-bat-trigger__grip-cap" aria-hidden="true" />
+        </div>
+        <span className="mobile-bat-trigger__slot-label">Pull to load</span>
       </div>
 
-      <p className="mobile-arcade-controls__howto">
-        Drag to pull the bat back, then <strong>release</strong> to swing (same as mouse on
-        desktop).
-      </p>
+      <div className="mobile-bat-trigger__sticker" aria-hidden="true">
+        <svg
+          className="mobile-bat-trigger__sticker-arrow"
+          viewBox="0 0 120 48"
+          role="img"
+        >
+          <path
+            d="M 14 38 L 14 18 L 44 18"
+            fill="none"
+            stroke="rgba(255, 248, 220, 0.9)"
+            strokeWidth="3.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M 38 12 L 52 18 L 38 24"
+            fill="none"
+            stroke="rgba(255, 248, 220, 0.9)"
+            strokeWidth="3.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+        <div className="mobile-bat-trigger__sticker-lines">
+          <span>Pull back</span>
+          <span>Release to swing</span>
+        </div>
+      </div>
     </div>
   )
 }

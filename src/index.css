@@ -29,23 +29,24 @@
 
 /*
  * Mobile layout (phones): set on <html data-game-layout="…"> from GameLayoutProvider.
- * Thinner frame + smaller page pad → more room for the logical canvas (see GameCanvas resize).
+ * Minimal frame + smaller page pad → maximum logical canvas (see GameCanvas resize).
  */
 [data-game-layout='mobile-landscape'],
 [data-game-layout='mobile-portrait'] {
-  --page-pad: clamp(3px, 1.2vmin, 8px);
-  --playfield-frame-total-x: 22px;
-  --playfield-frame-total-y: 22px;
+  --page-pad: clamp(2px, 1vmin, 6px);
+  --playfield-frame-total-x: 10px;
+  --playfield-frame-total-y: 10px;
 }
 
 [data-game-layout='mobile-portrait'] {
-  /* Band under canvas: joystick + swing + short how-to copy */
-  --mobile-portrait-controls-reserved: 132px;
+  /* Band under canvas: bat trigger + sticker (Ichiro area stays visible above). */
+  --mobile-portrait-controls-reserved: 152px;
 }
 
 [data-game-layout='mobile-landscape'] {
-  /* Bar below canvas so controls never sit on top of the playfield / pitcher */
-  --mobile-landscape-controls-reserved: 108px;
+  /* Side rail width (subtracted from viewport width in JS; full height for playfield). */
+  --mobile-landscape-controls-reserved: 0px;
+  --mobile-landscape-controls-width: min(148px, 38vw);
 }
 
 [data-game-layout^='mobile'] .app-page {
@@ -75,6 +76,24 @@
   justify-content: center;
 }
 
+[data-game-layout='mobile-landscape'] .app-page__game-column {
+  align-items: stretch;
+}
+
+[data-game-layout='mobile-landscape'] .game-cabinet {
+  width: 100%;
+  max-width: 100%;
+  align-self: stretch;
+}
+
+[data-game-layout='mobile-landscape'] .game-cabinet__navy,
+[data-game-layout='mobile-landscape'] .game-cabinet__teal,
+[data-game-layout='mobile-landscape'] .game-cabinet__silver,
+[data-game-layout='mobile-landscape'] .game-cabinet__stage {
+  width: 100%;
+  max-width: 100%;
+}
+
 [data-game-layout^='mobile'] .game-cabinet {
   max-width: 100%;
   filter: drop-shadow(0 8px 22px rgba(0, 0, 0, 0.38))
@@ -82,24 +101,24 @@
 }
 
 [data-game-layout^='mobile'] .game-cabinet__navy {
-  padding: 3px;
-  border-radius: 8px;
-  border: 2px solid var(--m-red);
+  padding: 1px;
+  border-radius: 6px;
+  border: 1px solid var(--m-red);
 }
 
 [data-game-layout^='mobile'] .game-cabinet__teal {
-  padding: 2px;
-  border-radius: 6px;
+  padding: 1px;
+  border-radius: 4px;
 }
 
 [data-game-layout^='mobile'] .game-cabinet__silver {
-  padding: 1px;
-  border-radius: 5px;
+  padding: 0;
+  border-radius: 3px;
 }
 
 [data-game-layout^='mobile'] .game-cabinet__stage {
-  padding: 3px;
-  border-radius: 3px;
+  padding: 2px;
+  border-radius: 2px;
 }
 
 /* Dev host is not mounted on mobile; keep a guard for stray markup. */
@@ -168,7 +187,7 @@
   }
 }
 
-/* Game canvas + mobile arcade overlay (portrait: band below board). */
+/* Game canvas + mobile bat trigger (landscape: beside board; portrait: band below). */
 .game-canvas-shell {
   position: relative;
   display: inline-flex;
@@ -185,145 +204,204 @@
   min-width: 0;
 }
 
-/* Controls sit in a dedicated band under the board (portrait + landscape phones). */
-.game-canvas-shell--mobile .game-canvas-shell__board {
+.game-canvas-shell--mobile:not(.game-canvas-shell--mobile-landscape)
+  .game-canvas-shell__board {
   flex: 0 0 auto;
 }
 
-.game-canvas-shell--mobile .mobile-arcade-controls {
-  position: relative;
-  flex: 0 0 auto;
+.game-canvas-shell--mobile-landscape {
+  flex-direction: row;
+  align-items: stretch;
+  width: 100%;
+  max-width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
-.mobile-arcade-controls {
+.game-canvas-shell--mobile-landscape .game-canvas-shell__board {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: row;
+  justify-content: flex-start;
+  align-items: stretch;
+}
+
+.mobile-bat-trigger-panel {
   position: relative;
   z-index: 6;
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 6px;
-  padding: 0 10px 8px;
   box-sizing: border-box;
-  touch-action: manipulation;
+  touch-action: none;
   -webkit-user-select: none;
   user-select: none;
 }
 
-.mobile-arcade-controls__main {
-  display: flex;
-  flex-direction: row;
-  align-items: flex-end;
+.game-canvas-shell--mobile-landscape .mobile-bat-trigger-panel {
+  flex: 0 0 var(--mobile-landscape-controls-width, 148px);
+  width: var(--mobile-landscape-controls-width, 148px);
+  min-width: 0;
+  padding: 6px 8px 6px 6px;
   justify-content: center;
-  gap: 12px;
+  border-left: 1px solid rgba(0, 92, 92, 0.4);
+  background: linear-gradient(
+    90deg,
+    rgba(6, 10, 18, 0.15) 0%,
+    rgba(8, 18, 32, 0.94) 100%
+  );
+}
+
+.mobile-bat-trigger-panel--portrait {
   width: 100%;
-}
-
-.mobile-arcade-controls__howto {
-  margin: 0;
-  padding: 0 2px 4px;
-  font: 600 11px/1.35 system-ui, sans-serif;
-  color: rgba(210, 225, 240, 0.88);
-  text-align: center;
-  letter-spacing: 0.01em;
-}
-
-.mobile-arcade-controls__howto strong {
-  color: #fff8f0;
-  font-weight: 700;
-}
-
-.mobile-arcade-controls--landscape .mobile-arcade-controls__howto {
-  font-size: 10px;
-  padding-bottom: 2px;
-}
-
-.mobile-arcade-controls--portrait {
-  width: 100%;
-  min-height: calc(var(--mobile-portrait-controls-reserved, 132px) - 4px);
-  padding: 6px 10px max(10px, env(safe-area-inset-bottom, 0px));
+  min-height: calc(var(--mobile-portrait-controls-reserved, 152px) - 6px);
+  padding: 8px 12px max(10px, env(safe-area-inset-bottom, 0px)) 10px;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 6px;
   background: linear-gradient(
     180deg,
     rgba(6, 10, 18, 0) 0%,
-    rgba(8, 18, 32, 0.92) 38%,
+    rgba(8, 18, 32, 0.9) 35%,
     rgba(6, 12, 22, 0.98) 100%
   );
-  border-top: 1px solid rgba(0, 92, 92, 0.45);
+  border-top: 1px solid rgba(0, 92, 92, 0.42);
 }
 
-.mobile-arcade-controls--landscape {
+.mobile-bat-trigger {
+  position: relative;
+  width: 112px;
+  height: 128px;
+  touch-action: none;
+  cursor: grab;
+  flex: 0 0 auto;
+}
+
+.mobile-bat-trigger-panel--portrait .mobile-bat-trigger {
+  margin-left: 0;
+}
+
+.mobile-bat-trigger__rail {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 28px;
+  height: 52px;
+  pointer-events: none;
+  opacity: 0.85;
+}
+
+.mobile-bat-trigger__arc-svg {
   width: 100%;
-  min-height: calc(var(--mobile-landscape-controls-reserved, 108px) - 6px);
-  padding: 6px 10px max(8px, env(safe-area-inset-bottom, 0px));
-  justify-content: flex-end;
+  height: 100%;
+  display: block;
+}
+
+.mobile-bat-trigger__bat-wrap {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  width: 44px;
+  height: 118px;
+  margin-left: -22px;
+  transform-origin: 50% 92%;
+  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.45));
+  pointer-events: none;
+}
+
+.mobile-bat-trigger__bat-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0.96;
+  filter: contrast(1.05) saturate(0.92);
+}
+
+.mobile-bat-trigger__grip-cap {
+  position: absolute;
+  left: 50%;
+  bottom: 4px;
+  width: 22px;
+  height: 14px;
+  margin-left: -11px;
+  border-radius: 4px;
   background: linear-gradient(
     180deg,
-    rgba(6, 10, 18, 0) 0%,
-    rgba(8, 18, 32, 0.88) 42%,
-    rgba(6, 12, 22, 0.96) 100%
+    rgba(55, 62, 72, 0.95) 0%,
+    rgba(28, 34, 44, 0.98) 100%
   );
-  border-top: 1px solid rgba(0, 92, 92, 0.4);
+  border: 1px solid rgba(196, 206, 212, 0.4);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
-.mobile-arcade-controls__cluster {
+.mobile-bat-trigger__slot-label {
+  position: absolute;
+  bottom: 2px;
+  left: 50%;
+  transform: translateX(-50%);
+  font: 700 8px/1 system-ui, sans-serif;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(180, 200, 220, 0.65);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.mobile-bat-trigger__sticker {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
-}
-
-.mobile-arcade-controls__cluster--solo {
-  align-self: center;
-  align-items: center;
-}
-
-.mobile-joystick {
-  position: relative;
-  width: 96px;
-  height: 96px;
-  touch-action: none;
-  border-radius: 50%;
-  cursor: grab;
-}
-
-.mobile-joystick__caption {
-  font: 700 10px/1 system-ui, sans-serif;
-  letter-spacing: 0.14em;
-  color: rgba(200, 218, 235, 0.75);
-  margin-top: 2px;
-}
-
-.mobile-joystick__bezel {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  background: radial-gradient(
-    circle at 35% 30%,
-    rgba(55, 75, 95, 0.95) 0%,
-    rgba(18, 32, 52, 0.98) 55%,
-    #0a1420 100%
+  gap: 4px;
+  padding: 6px 10px 8px;
+  max-width: 200px;
+  border-radius: 8px;
+  background: linear-gradient(
+    165deg,
+    rgba(12, 44, 86, 0.92) 0%,
+    rgba(8, 28, 52, 0.96) 100%
   );
-  border: 3px solid rgba(196, 206, 212, 0.35);
-  box-shadow: inset 0 3px 10px rgba(0, 0, 0, 0.55),
-    0 4px 14px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(213, 0, 50, 0.2);
+  border: 1px solid rgba(0, 92, 92, 0.55);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
-.mobile-joystick__knob {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 38px;
-  height: 38px;
-  transform: translate(-50%, -50%);
-  border-radius: 50%;
-  background: radial-gradient(
-    circle at 32% 28%,
-    #f2f6fa 0%,
-    #c4ced4 42%,
-    #7a8794 100%
-  );
-  border: 2px solid rgba(12, 44, 86, 0.55);
-  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4);
-  pointer-events: none;
+.mobile-bat-trigger-panel--portrait .mobile-bat-trigger__sticker {
+  flex: 0 1 auto;
+  align-self: flex-end;
+  max-width: min(220px, 88vw);
+}
+
+.game-canvas-shell--mobile-landscape .mobile-bat-trigger__sticker {
+  margin-top: 4px;
+  max-width: none;
+  width: 100%;
+  padding: 5px 6px 6px;
+}
+
+.mobile-bat-trigger__sticker-arrow {
+  width: 112px;
+  height: 44px;
+  display: block;
+}
+
+.mobile-bat-trigger__sticker-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: center;
+  font: 700 10px/1.25 'Oswald', system-ui, sans-serif;
+  letter-spacing: 0.04em;
+  color: rgba(240, 248, 255, 0.95);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+
+.mobile-bat-trigger__sticker-lines span:last-child {
+  font-weight: 600;
+  font-size: 9px;
+  color: rgba(255, 220, 160, 0.92);
 }
 
 @keyframes rotate-play-hint-spin {

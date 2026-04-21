@@ -4,6 +4,7 @@
  */
 
 import { measureOpaqueBounds, type OpaqueBounds } from './spriteOpaqueBounds'
+import { TARGET_GOLD_GLOW_SHADOW } from './targetSpriteGlow'
 
 export const CLOUD_VARIANT_COUNT = 6
 
@@ -30,9 +31,6 @@ export const HOTDOG_SPRITE_VISUAL_SCALE_MUL = 3 * 1.3
 /** Extra scale on phones so clouds stay readable (draw + hit test). */
 export const CLOUD_SPRITE_MOBILE_SCALE_MUL = 3
 
-/** Modest gold outer glow for floating bonus WebPs (clouds + parachute drop). */
-const BONUS_SPRITE_GOLD_GLOW_SHADOW = 'rgba(222, 188, 88, 0.34)'
-
 function modestGoldOuterGlowBlurPx(
   layoutScale: number,
   screenScaleMul: number,
@@ -40,7 +38,7 @@ function modestGoldOuterGlowBlurPx(
 ): number {
   const m = Math.max(0.85, screenScaleMul * 0.48)
   const pop = 0.88 + 0.12 * Math.min(1.65, scaleMul)
-  return Math.min(15, Math.max(5, 7.2 * layoutScale * m * pop))
+  return Math.min(24, Math.max(7, 9.2 * layoutScale * m * pop))
 }
 
 function drawImageRectWithModestGoldGlow(
@@ -59,7 +57,7 @@ function drawImageRectWithModestGoldGlow(
   scaleMul: number
 ): void {
   ctx.save()
-  ctx.shadowColor = BONUS_SPRITE_GOLD_GLOW_SHADOW
+  ctx.shadowColor = TARGET_GOLD_GLOW_SHADOW
   ctx.shadowBlur = modestGoldOuterGlowBlurPx(layoutScale, screenScaleMul, scaleMul)
   ctx.shadowOffsetX = 0
   ctx.shadowOffsetY = 0

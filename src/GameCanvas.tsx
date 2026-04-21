@@ -95,6 +95,9 @@ import {
   MOOSE_TARGET_TEX_ANCHOR_X_FR,
   MOOSE_TARGET_TEX_ANCHOR_Y_FR,
   MOOSE_TARGET_TEX_RADIUS_FR_OF_NAT_W,
+  SALMON_TARGET_TEX_ANCHOR_X_FR,
+  SALMON_TARGET_TEX_ANCHOR_Y_FR,
+  SALMON_TARGET_TEX_RADIUS_FR_OF_NAT_W,
   POWER_FIELD_BOARD_ASPECT,
   POWER_FIELD_BOARD_CENTER_X_FR,
   POWER_FIELD_BOARD_CENTER_Y_FR,
@@ -104,6 +107,20 @@ import {
   POWER_FIELD_BOARD_WIDTH_FR,
   type SceneLayout,
 } from './sceneLayout'
+import {
+  makeMiddleRingClusteredSlotAngles,
+  middleRingArtKind,
+  MIDDLE_RING_SLOT_COUNT,
+  SALMON_TARGET_SCALE,
+  type MiddleRingArtKind,
+  type MiddleRingTargetImages,
+} from './middleRingTargets'
+import {
+  discTargetImageShadowBlurPx,
+  drawDiscPegGoldenOuterGlow,
+  drawMiddleRingSignGoldenHalo,
+  TARGET_GOLD_GLOW_SHADOW,
+} from './targetSpriteGlow'
 
 /** Board aspect matches design field `2048×1152` until sprites load (then unchanged). */
 const FALLBACK_BOARD_ASPECT = BOARD_DESIGN_ASPECT
@@ -124,7 +141,11 @@ const OUTGOING_GRAVITY = 392
 const RING_OMEGA = 0.55
 /** Concentric rows: index 0 = front/smallest, 2 = back/largest. */
 const RING_COUNT = 3
-const RING_TARGET_COUNTS: [number, number, number] = [7, 7, 8]
+const RING_TARGET_COUNTS: [number, number, number] = [
+  7,
+  MIDDLE_RING_SLOT_COUNT,
+  8,
+]
 /** Stretch scales with speed / this (px/s) for motion feel. */
 const BALL_STRETCH_SPEED_REF = 720
 const BALL_STRETCH_MAX = 0.48
@@ -411,25 +432,16 @@ function thetaChargeFromPointer(px: number, py: number, ptr: Vec2): number {
   return clamp(raw, THETA_CHARGE_MIN, THETA_CHARGE_MAX)
 }
 
-/** Normalized joystick vector (−1…1); maps to same θ arc as pivot→pointer on desktop. */
-const MOBILE_JOYSTICK_DEADZONE = 0.14
-/** When the stick is near center, charging still needs a non-rest θ (lift-to-swing). */
-const MOBILE_JOYSTICK_DEFAULT_PULL_X = -0.52
-const MOBILE_JOYSTICK_DEFAULT_PULL_Y = -0.2
+/**
+ * Mobile bat trigger: pullback only along a **45° rightward** swing load arc from rest
+ * (same energy model as desktop — full 0…1 power bands; only the input path differs).
+ * θ ranges from {@link THETA_REST} to THETA_REST + this (toward plate / right in aim space).
+ */
+const MOBILE_PULLBACK_ARC_RAD = Math.PI / 4
 
-function thetaFromNormalizedJoystick(
-  pivot: Vec2,
-  jx: number,
-  jy: number
-): number {
-  const m = Math.hypot(jx, jy)
-  if (m < MOBILE_JOYSTICK_DEADZONE) return THETA_REST
-  const ux = jx / m
-  const uy = jy / m
-  return thetaChargeFromPointer(pivot.x, pivot.y, {
-    x: pivot.x + ux * 520,
-    y: pivot.y + uy * 520,
-  })
+function thetaFromMobilePullback01(u: number): number {
+  const t = clamp(u, 0, 1)
+  return THETA_REST + t * MOBILE_PULLBACK_ARC_RAD
 }
 
 function canBeginBatGrab(sim: Sim): boolean {
@@ -734,7 +746,8 @@ function createDiscRingsForLayout(
   return radii.map((dims, r) => {
     const omega = r % 2 === 0 ? RING_OMEGA : -RING_OMEGA
     const n = RING_TARGET_COUNTS[r]
-    const slotAngles = makeSlotAngles(n)
+    const slotAngles =
+      r === 1 ? makeMiddleRingClusteredSlotAngles() : makeSlotAngles(n)
     return {
       center: centers[r],
       radiusOuter: dims.ro,
@@ -912,13 +925,68 @@ function clipToRegionAboveOccluderY(
   ctx.clip()
 }
 
+/** Draw moose or salmon at rim point; sign anchor matches disc hit circle (`targetR`). */
+function drawMiddleRingTargetSprite(
+  ctx: CanvasRenderingContext2D,
+  kind: MiddleRingArtKind,
+  pt: Vec2,
+  targetR: number,
+  imgs: MiddleRingTargetImages | null,
+  alphaMul: number
+): boolean {
+  if (!imgs) return false
+  const im: HTMLImageElement | null =
+    kind === 'moose'
+      ? imgs.moose
+      : kind === 'salmon1'
+        ? imgs.salmon1
+        : kind === 'salmon2'
+          ? imgs.salmon2
+          : kind === 'salmon3'
+            ? imgs.salmon3
+            : imgs.salmon4
+  if (!im?.complete || im.naturalWidth < 1) return false
+
+  const iw = im.naturalWidth
+  const ih = im.naturalHeight
+  const anchorX =
+    kind === 'moose'
+      ? MOOSE_TARGET_TEX_ANCHOR_X_FR
+      : SALMON_TARGET_TEX_ANCHOR_X_FR
+  const anchorY =
+    kind === 'moose'
+      ? MOOSE_TARGET_TEX_ANCHOR_Y_FR
+      : SALMON_TARGET_TEX_ANCHOR_Y_FR
+  const k =
+    kind === 'moose'
+      ? MOOSE_TARGET_TEX_RADIUS_FR_OF_NAT_W
+      : SALMON_TARGET_TEX_RADIUS_FR_OF_NAT_W
+  const sizeMul = kind === 'moose' ? 1 : SALMON_TARGET_SCALE
+  const dw = (targetR / k) * sizeMul
+  const dh = ih * (dw / iw)
+  const ax = pt.x - anchorX * dw
+  const ay = pt.y - anchorY * dh
+  const signR = targetR * sizeMul
+  drawMiddleRingSignGoldenHalo(ctx, pt.x, pt.y, signR, alphaMul)
+  ctx.save()
+  ctx.globalAlpha *= alphaMul
+  ctx.imageSmoothingEnabled = true
+  ctx.shadowColor = TARGET_GOLD_GLOW_SHADOW
+  ctx.shadowBlur = discTargetImageShadowBlurPx(signR)
+  ctx.shadowOffsetX = 0
+  ctx.shadowOffsetY = 0
+  ctx.drawImage(im, 0, 0, iw, ih, ax, ay, dw, dh)
+  ctx.restore()
+  return true
+}
+
 function drawRingRowTargets(
   ctx: CanvasRenderingContext2D,
   ring: DiscWheelRing,
   ringIdx: number,
   revealLabels: boolean,
   targetR: number,
-  mooseTargetImg: HTMLImageElement | null
+  middleRingImgs: MiddleRingTargetImages | null
 ): void {
   const Rmid = ringMidFromDiscRing(ring)
   const { x: cx, y: cy } = ring.center
@@ -965,27 +1033,20 @@ function drawRingRowTargets(
     const drawDebugLowerDisc = !upper && revealLabels
 
     if (drawLiveDisc || drawDebugLowerDisc) {
-      /** Only the middle wheel (51 pt row, `TARGET_RING_POINTS[1]`) uses the moose art. */
-      const useMoose =
+      /** Middle wheel (51 pt): moose + salmon variants; uneven spacing in {@link makeMiddleRingClusteredSlotAngles}. */
+      const kind = ringIdx === 1 ? middleRingArtKind(i) : 'moose'
+      const usedArt =
         ringIdx === 1 &&
-        mooseTargetImg &&
-        mooseTargetImg.complete &&
-        mooseTargetImg.naturalWidth > 0
+        drawMiddleRingTargetSprite(
+          ctx,
+          kind,
+          pt,
+          targetR,
+          middleRingImgs,
+          drawDebugLowerDisc ? 0.45 : 1
+        )
 
-      if (useMoose) {
-        const iw = mooseTargetImg.naturalWidth
-        const ih = mooseTargetImg.naturalHeight
-        const k = MOOSE_TARGET_TEX_RADIUS_FR_OF_NAT_W
-        const dw = targetR / k
-        const dh = ih * (dw / iw)
-        const ax = pt.x - MOOSE_TARGET_TEX_ANCHOR_X_FR * dw
-        const ay = pt.y - MOOSE_TARGET_TEX_ANCHOR_Y_FR * dh
-        ctx.save()
-        if (drawDebugLowerDisc) ctx.globalAlpha = 0.45
-        ctx.imageSmoothingEnabled = true
-        ctx.drawImage(mooseTargetImg, 0, 0, iw, ih, ax, ay, dw, dh)
-        ctx.restore()
-      } else {
+      if (!usedArt) {
         ctx.beginPath()
         ctx.arc(pt.x, pt.y, targetR, 0, Math.PI * 2)
         if (drawDebugLowerDisc) {
@@ -995,11 +1056,18 @@ function drawRingRowTargets(
           ctx.stroke()
           ctx.setLineDash([])
         } else {
+          ctx.save()
+          drawDiscPegGoldenOuterGlow(ctx, pt.x, pt.y, targetR, 1)
           ctx.fillStyle = pal.liveFill
           ctx.strokeStyle = pal.liveStroke
           ctx.lineWidth = 2.25
+          ctx.shadowColor = TARGET_GOLD_GLOW_SHADOW
+          ctx.shadowBlur = discTargetImageShadowBlurPx(targetR)
+          ctx.shadowOffsetX = 0
+          ctx.shadowOffsetY = 0
           ctx.fill()
           ctx.stroke()
+          ctx.restore()
         }
       }
     }
@@ -1024,7 +1092,11 @@ function drawRingRowTargets(
       ctx.font = '9px ui-monospace, monospace'
       ctx.fillStyle = 'rgba(255,255,255,0.72)'
       const tag = upper ? (active ? 'LIVE' : 'hit') : 'off'
-      ctx.fillText(`${ringIdx}:${tag}`, pt.x - 12, pt.y + 4)
+      const label =
+        ringIdx === 1
+          ? `${ringIdx}:${middleRingArtKind(i)}:${tag}`
+          : `${ringIdx}:${tag}`
+      ctx.fillText(label, pt.x - 12, pt.y + 4)
       ctx.restore()
     }
   }
@@ -2101,7 +2173,6 @@ function resolveSingleTargetHit(
   const x1 = b.x
   const y1 = b.y
   const tR = targetRadiusPx(sim)
-  const expandedR = tR + b.r
   const minRing = sim.ballNextHitMinRing ?? 0
   const { ux, uy } = flightUnitVector(b, x0, y0, x1, y1)
 
@@ -2125,6 +2196,11 @@ function resolveSingleTargetHit(
         worldAngle
       )
 
+      const kind = r === 1 ? middleRingArtKind(i) : 'moose'
+      const slotTR =
+        r === 1 && kind !== 'moose' ? tR * SALMON_TARGET_SCALE : tR
+      const expandedR = slotTR + b.r
+
       let tHit = segmentCircleEarliestHit(
         x0,
         y0,
@@ -2136,7 +2212,7 @@ function resolveSingleTargetHit(
       )
       if (
         tHit == null &&
-        circlesOverlap(x1, y1, b.r, tp.x, tp.y, tR)
+        circlesOverlap(x1, y1, b.r, tp.x, tp.y, slotTR)
       ) {
         tHit = 1
       }
@@ -2933,7 +3009,13 @@ export function GameCanvas({
   const spritesRef = useRef<LoadedGameSprites | null>(null)
   const pitcherPackRef = useRef<PitcherPack | null>(null)
   const cloudPackRef = useRef<CloudTargetPack | null>(null)
-  const mooseTargetImgRef = useRef<HTMLImageElement | null>(null)
+  const middleRingTargetImgsRef = useRef<MiddleRingTargetImages>({
+    moose: null,
+    salmon1: null,
+    salmon2: null,
+    salmon3: null,
+    salmon4: null,
+  })
   const devDrawOptionsRef = useRef<DevDrawOptions>({
     clipDiscLowerHalf: true,
     revealHiddenLayers: false,
@@ -2956,12 +3038,8 @@ export function GameCanvas({
   const boardAspectRef = useRef(FALLBACK_BOARD_ASPECT)
   const [devToolsHostEl, setDevToolsHostEl] = useState<HTMLElement | null>(null)
   const launcherHudPreRef = useRef<HTMLPreElement | null>(null)
-  const mobileJoystickVecRef = useRef({ x: 0, y: 0 })
-  /** Last stick offset outside deadzone while charging (avoids θ→rest when knob nears center). */
-  const mobileLastNondeadJoyRef = useRef({
-    x: MOBILE_JOYSTICK_DEFAULT_PULL_X,
-    y: MOBILE_JOYSTICK_DEFAULT_PULL_Y,
-  })
+  /** 0…1 pullback along the mobile 45° arc (drives θ + pCurrent while charging). */
+  const mobileBatPull01Ref = useRef(0)
   const endChargeRef = useRef<((sim: Sim) => void) | null>(null)
 
   const resize = useCallback(() => {
@@ -2984,15 +3062,16 @@ export function GameCanvas({
     const portraitBand =
       parseFloat(csRoot.getPropertyValue('--mobile-portrait-controls-reserved').trim()) ||
       0
-    const landscapeBand =
+    const landscapeCtrlW =
       parseFloat(
-        csRoot.getPropertyValue('--mobile-landscape-controls-reserved').trim()
+        csRoot.getPropertyValue('--mobile-landscape-controls-width').trim()
       ) || 0
     const layoutKind = document.documentElement.dataset.gameLayout
     if (layoutKind === 'mobile-portrait' && portraitBand > 0) {
       vh = Math.max(1, vh - portraitBand)
-    } else if (layoutKind === 'mobile-landscape' && landscapeBand > 0) {
-      vh = Math.max(1, vh - landscapeBand)
+    } else if (layoutKind === 'mobile-landscape' && landscapeCtrlW > 0) {
+      /* Controls sit beside the board — width comes from playfield, full height for canvas. */
+      vw = Math.max(1, vw - landscapeCtrlW)
     }
 
     const aspect = boardAspectRef.current
@@ -3038,20 +3117,69 @@ export function GameCanvas({
 
   useEffect(() => {
     let cancelled = false
-    const im = new Image()
-    im.decoding = 'async'
-    im.onload = () => {
-      if (!cancelled) {
-        mooseTargetImgRef.current = im
-        setSpritesRevision((n) => n + 1)
+    const bump = () => {
+      if (!cancelled) setSpritesRevision((n) => n + 1)
+    }
+    const clear = () => {
+      middleRingTargetImgsRef.current = {
+        moose: null,
+        salmon1: null,
+        salmon2: null,
+        salmon3: null,
+        salmon4: null,
       }
     }
-    im.onerror = () => {
-      if (!cancelled) mooseTargetImgRef.current = null
+
+    const moose = new Image()
+    moose.decoding = 'async'
+    moose.onload = () => {
+      if (!cancelled) {
+        middleRingTargetImgsRef.current.moose = moose
+        bump()
+      }
     }
-    im.src = '/assets/moose.webp'
+    moose.onerror = () => {
+      if (!cancelled) {
+        middleRingTargetImgsRef.current.moose = null
+        bump()
+      }
+    }
+    moose.src = '/assets/moose.webp'
+
+    const salmonUrls = [
+      '/assets/salmon/salmon1.webp',
+      '/assets/salmon/salmon2.webp',
+      '/assets/salmon/salmon3.webp',
+      '/assets/salmon/salmon4.webp',
+    ] as const
+    const salmonKeys: (keyof MiddleRingTargetImages)[] = [
+      'salmon1',
+      'salmon2',
+      'salmon3',
+      'salmon4',
+    ]
+    for (let s = 0; s < salmonUrls.length; s++) {
+      const im = new Image()
+      im.decoding = 'async'
+      const key = salmonKeys[s]
+      im.onload = () => {
+        if (!cancelled) {
+          middleRingTargetImgsRef.current[key] = im
+          bump()
+        }
+      }
+      im.onerror = () => {
+        if (!cancelled) {
+          middleRingTargetImgsRef.current[key] = null
+          bump()
+        }
+      }
+      im.src = salmonUrls[s]
+    }
+
     return () => {
       cancelled = true
+      clear()
     }
   }, [])
 
@@ -3218,7 +3346,7 @@ export function GameCanvas({
             r,
             dev.revealHiddenLayers,
             targetRDraw,
-            mooseTargetImgRef.current
+            middleRingTargetImgsRef.current
           )
           ctx.restore()
         }
@@ -3238,7 +3366,7 @@ export function GameCanvas({
             r,
             dev.revealHiddenLayers,
             targetRDraw,
-            mooseTargetImgRef.current
+            middleRingTargetImgsRef.current
           )
         }
       }
@@ -3606,18 +3734,13 @@ export function GameCanvas({
           sim.pointer!
         )
       } else {
-        const j = mobileJoystickVecRef.current
-        const jm = Math.hypot(j.x, j.y)
-        if (jm >= MOBILE_JOYSTICK_DEADZONE) {
-          mobileLastNondeadJoyRef.current = { x: j.x, y: j.y }
-        }
-        const jUse =
-          jm >= MOBILE_JOYSTICK_DEADZONE
-            ? j
-            : mobileLastNondeadJoyRef.current
-        sim.theta = thetaFromNormalizedJoystick(sim.pivot, jUse.x, jUse.y)
+        const u = clamp(mobileBatPull01Ref.current, 0, 1)
+        sim.theta = thetaFromMobilePullback01(u)
+        sim.pCurrent = u
       }
-      sim.pCurrent = pullbackNormalizedFromVisualTheta(sim.theta)
+      if (chargingViaPointer) {
+        sim.pCurrent = pullbackNormalizedFromVisualTheta(sim.theta)
+      }
       sim.omega = 0
       sim.pitchArmElapsed += dt
     } else if (sim.phase === 'swing') {
@@ -4067,10 +4190,7 @@ export function GameCanvas({
     if (sim.phase !== 'charging') return
 
     sim.mobileChargeViaControls = false
-    mobileLastNondeadJoyRef.current = {
-      x: MOBILE_JOYSTICK_DEFAULT_PULL_X,
-      y: MOBILE_JOYSTICK_DEFAULT_PULL_Y,
-    }
+    mobileBatPull01Ref.current = 0
 
     sim.pRelease = sim.pCurrent
     sim.thetaRelease = sim.theta
@@ -4104,7 +4224,7 @@ export function GameCanvas({
 
   endChargeRef.current = endCharge
 
-  const onJoystickActiveChange = useCallback(
+  const onBatTriggerActiveChange = useCallback(
     (active: boolean) => {
       const sim = simRef.current
       if (!sim || !layoutRef.current.isMobile) return
@@ -4122,19 +4242,9 @@ export function GameCanvas({
         sim.batCrossLaunchTime = null
         sim.pointer = null
         sim.mobileChargeViaControls = true
-        const j = mobileJoystickVecRef.current
-        const jm = Math.hypot(j.x, j.y)
-        if (jm >= MOBILE_JOYSTICK_DEADZONE) {
-          mobileLastNondeadJoyRef.current = { x: j.x, y: j.y }
-        } else {
-          mobileLastNondeadJoyRef.current = {
-            x: MOBILE_JOYSTICK_DEFAULT_PULL_X,
-            y: MOBILE_JOYSTICK_DEFAULT_PULL_Y,
-          }
-        }
-        const j0 = mobileLastNondeadJoyRef.current
-        sim.theta = thetaFromNormalizedJoystick(sim.pivot, j0.x, j0.y)
-        sim.pCurrent = pullbackNormalizedFromVisualTheta(sim.theta)
+        mobileBatPull01Ref.current = 0
+        sim.theta = THETA_REST
+        sim.pCurrent = 0
       } else if (sim.phase === 'charging' && sim.mobileChargeViaControls) {
         /* Lift-to-swing: same as desktop mouse-up (commit or cancel via power deadzone). */
         endChargeRef.current?.(sim)
@@ -4144,21 +4254,14 @@ export function GameCanvas({
     [draw]
   )
 
-  const onJoystickOffset = useCallback(
-    (x: number, y: number) => {
-      mobileJoystickVecRef.current = { x, y }
-      const jm = Math.hypot(x, y)
-      if (jm >= MOBILE_JOYSTICK_DEADZONE) {
-        mobileLastNondeadJoyRef.current = { x, y }
-      }
+  const onMobileBatPull01Change = useCallback(
+    (u: number) => {
+      mobileBatPull01Ref.current = clamp(u, 0, 1)
       const sim = simRef.current
       if (sim?.phase === 'charging' && sim.mobileChargeViaControls) {
-        const jUse =
-          jm >= MOBILE_JOYSTICK_DEADZONE
-            ? { x, y }
-            : mobileLastNondeadJoyRef.current
-        sim.theta = thetaFromNormalizedJoystick(sim.pivot, jUse.x, jUse.y)
-        sim.pCurrent = pullbackNormalizedFromVisualTheta(sim.theta)
+        const t = clamp(u, 0, 1)
+        sim.theta = thetaFromMobilePullback01(t)
+        sim.pCurrent = t
         draw()
       }
     },
@@ -4412,6 +4515,9 @@ export function GameCanvas({
     'game-canvas-shell',
     layout.isMobile ? 'game-canvas-shell--mobile' : '',
     layout.isPortraitMobile ? 'game-canvas-shell--portrait' : '',
+    layout.isMobile && !layout.isPortraitMobile
+      ? 'game-canvas-shell--mobile-landscape'
+      : '',
   ]
     .filter(Boolean)
     .join(' ')
@@ -4442,8 +4548,8 @@ export function GameCanvas({
         {layout.isMobile ? (
           <MobileArcadeControls
             variant={layout.isPortraitMobile ? 'portrait' : 'landscape'}
-            onJoystickActiveChange={onJoystickActiveChange}
-            onJoystickOffset={onJoystickOffset}
+            onBatTriggerActiveChange={onBatTriggerActiveChange}
+            onBatPull01Change={onMobileBatPull01Change}
           />
         ) : null}
       </div>
