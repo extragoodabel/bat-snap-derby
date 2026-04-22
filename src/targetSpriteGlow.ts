@@ -71,39 +71,34 @@ export function discTargetImageShadowBlurPx(refRadiusPx: number): number {
   return Math.min(34, Math.max(11, refRadiusPx * 1.22))
 }
 
-/** Spacey bonus sprite — warm orange (distinct from wheel gold). */
-export const SPACEY_ORANGE_GLOW_SHADOW = 'rgba(255, 118, 28, 0.82)'
+/** Spacey: same gold family as wheel targets; ~50% softer than full peg shadow alpha. */
+export const SPACEY_GOLD_GLOW_SHADOW = 'rgba(255, 198, 72, 0.41)'
 
-/** Soft radial halo behind Spacey at screen anchor (does not rotate with peek). */
-export function drawSpaceyOrangeRadialHalo(
+const SPACEY_HALO_STRENGTH = 0.5
+/** `signRadiusPx` fraction of sprite extent — keeps radial ~½ the old Spacey halo size. */
+const SPACEY_HALO_EXTENT_FR = 0.11
+
+/**
+ * Outer golden halo behind Spacey (same gradient recipe as middle-ring signs), calmed by
+ * {@link SPACEY_HALO_STRENGTH} on size/intensity vs a full wheel peg halo.
+ */
+export function drawSpaceyGoldenOuterGlow(
   ctx: CanvasRenderingContext2D,
   cx: number,
   cy: number,
-  extentR: number,
+  spriteMaxExtentPx: number,
   alphaMul: number
 ): void {
-  const outerR = extentR * 2.25
-  ctx.save()
-  ctx.globalAlpha *= alphaMul
-  const g = ctx.createRadialGradient(
+  drawMiddleRingSignGoldenHalo(
+    ctx,
     cx,
     cy,
-    extentR * 0.06,
-    cx,
-    cy,
-    outerR
+    spriteMaxExtentPx * SPACEY_HALO_EXTENT_FR,
+    alphaMul * SPACEY_HALO_STRENGTH
   )
-  g.addColorStop(0, 'rgba(255, 210, 140, 0)')
-  g.addColorStop(0.42, 'rgba(255, 145, 55, 0.48)')
-  g.addColorStop(0.78, 'rgba(255, 95, 25, 0.18)')
-  g.addColorStop(1, 'rgba(255, 60, 0, 0)')
-  ctx.fillStyle = g
-  ctx.beginPath()
-  ctx.arc(cx, cy, outerR, 0, Math.PI * 2)
-  ctx.fill()
-  ctx.restore()
 }
 
-export function spaceySpriteShadowBlurPx(spriteMaxExtentPx: number): number {
-  return Math.min(40, Math.max(14, spriteMaxExtentPx * 0.42))
+/** Canvas shadow blur for Spacey — matches disc sprite glow curve at 50% strength/size. */
+export function spaceyGoldenShadowBlurPx(spriteMaxExtentPx: number): number {
+  return discTargetImageShadowBlurPx(spriteMaxExtentPx * 0.35) * SPACEY_HALO_STRENGTH
 }

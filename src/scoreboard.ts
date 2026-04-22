@@ -16,8 +16,11 @@ export function targetPointsForRing(ringIndex: number): number {
   return TARGET_RING_POINTS[ringIndex] ?? TARGET_RING_POINTS[0]
 }
 
-/** Floating cloud + parachute payload hits. */
+/** Drifting cloud bullseye hits (still spawns a parachute hotdog). */
 export const CLOUD_TARGET_POINTS = 116
+
+/** Ball hits the falling hotdog-from-heaven payload only (clouds use {@link CLOUD_TARGET_POINTS}). */
+export const HOTDOG_PAYLOAD_POINTS = 11
 
 export const SCOREBOARD_TIMED_MODE = false
 

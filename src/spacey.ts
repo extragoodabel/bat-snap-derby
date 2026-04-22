@@ -5,9 +5,9 @@
 import { circlesOverlap, type Ball } from './physics'
 import { designPx, DESIGN_REF_W, type SceneLayout } from './sceneLayout'
 import {
-  drawSpaceyOrangeRadialHalo,
-  SPACEY_ORANGE_GLOW_SHADOW,
-  spaceySpriteShadowBlurPx,
+  drawSpaceyGoldenOuterGlow,
+  SPACEY_GOLD_GLOW_SHADOW,
+  spaceyGoldenShadowBlurPx,
 } from './targetSpriteGlow'
 
 export const SPACEY_DOUBLE_SEC = 30
@@ -434,7 +434,7 @@ export function drawSpacey(
     celebrating && Math.floor(sim.simTime * 15) % 2 === 0
   const emergeA = 0.08 + 0.92 * sim.spaceyEmerge01
 
-  drawSpaceyOrangeRadialHalo(ctx, cx, cy, Math.max(w, h) * 0.44, emergeA)
+  drawSpaceyGoldenOuterGlow(ctx, cx, cy, Math.max(w, h), emergeA)
 
   ctx.save()
   ctx.translate(cx, cy)
@@ -443,8 +443,8 @@ export function drawSpacey(
   if (flashOn) {
     ctx.filter = 'brightness(1.75) saturate(1.15)'
   }
-  ctx.shadowColor = SPACEY_ORANGE_GLOW_SHADOW
-  ctx.shadowBlur = spaceySpriteShadowBlurPx(Math.max(w, h))
+  ctx.shadowColor = SPACEY_GOLD_GLOW_SHADOW
+  ctx.shadowBlur = spaceyGoldenShadowBlurPx(Math.max(w, h))
   ctx.shadowOffsetX = 0
   ctx.shadowOffsetY = 0
   ctx.drawImage(drawImg, -w / 2, -h / 2, w, h)

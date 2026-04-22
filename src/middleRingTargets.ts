@@ -1,11 +1,11 @@
 /**
- * Middle carnival wheel (51 pt row): moose + four salmon targets with uneven spacing and
- * permuted salmon1–3 order per block; salmon4 always trails the other three.
+ * Middle carnival wheel — **rim salmon/moose layout** kept for reference; live 51 pt salmon
+ * use {@link ./salmonRunTargets} (GameCanvas assigns zero middle-ring pegs).
  */
 
 const TAU = Math.PI * 2
 
-/** Peg count on the middle ring only (front/back rows use {@link RING_TARGET_COUNTS}). */
+/** Peg count for legacy rim layout (not used when middle row has zero pegs). */
 export const MIDDLE_RING_SLOT_COUNT = 10
 
 export type MiddleRingArtKind =

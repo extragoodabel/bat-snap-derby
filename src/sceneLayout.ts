@@ -96,3 +96,25 @@ export const SALMON_TARGET_TEX_ANCHOR_X_FR = 1024 / 2048
 export const SALMON_TARGET_TEX_ANCHOR_Y_FR = 620 / 2732
 /** Sign radius ÷ natural width — match on-screen radius to `targetR` like {@link MOOSE_TARGET_TEX_RADIUS_FR_OF_NAT_W}. */
 export const SALMON_TARGET_TEX_RADIUS_FR_OF_NAT_W = 200 / 2048
+
+/**
+ * Front ring hydroplanes (`public/assets/hydroplanes/{silver,green,red,yellow}.webp`, 2732×2048).
+ * Anchor = hull center / hit disc; tune to match art.
+ */
+export const HYDRO_PLANE_TEX_ANCHOR_X_FR = 1366 / 2732
+export const HYDRO_PLANE_TEX_ANCHOR_Y_FR = 1040 / 2048
+/** Hull hit radius ÷ natural width — scales sprite so disc `targetR` matches gameplay. */
+export const HYDRO_PLANE_TEX_RADIUS_FR_OF_NAT_W = 210 / 2732
+
+/**
+ * Environmental hydro race (Mariners Hydro Challenge): horizontal pass through the field1
+ * seating band — above the infield play area, below drifting clouds. Fractions of logical canvas height.
+ */
+export const HYDRO_RACE_BAND_Y_MIN_FR = 0.248
+export const HYDRO_RACE_BAND_Y_MAX_FR = 0.488
+
+/**
+ * Salmon run (51 pt): lower-mid lane along field edge / base of stands — below hydro band.
+ */
+export const SALMON_RUN_BAND_Y_MIN_FR = 0.528
+export const SALMON_RUN_BAND_Y_MAX_FR = 0.678

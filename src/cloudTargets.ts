@@ -5,7 +5,7 @@
  * Independent from spinning disc targets.
  */
 import { circlesOverlap, type Ball } from './physics'
-import { CLOUD_TARGET_POINTS } from './scoreboard'
+import { CLOUD_TARGET_POINTS, HOTDOG_PAYLOAD_POINTS } from './scoreboard'
 import {
   CLOUD_VARIANT_COUNT,
   cloudSpriteHitRadiusPx,
@@ -97,7 +97,7 @@ export type FloatingCloudSimFields = {
   score: number
   /** Same `scale` as `SceneLayout` — scales hit radii / placeholder art with the board. */
   sceneLayout: { scale: number }
-  /** Spacey / other bonuses: applied to {@link CLOUD_TARGET_POINTS} adds. */
+  /** Spacey / other bonuses: applied to cloud + hotdog score adds. */
   scorePointMultiplier: number
   cloudTargets: CloudTarget[]
   parachutePayloads: ParachutePayload[]
@@ -235,13 +235,14 @@ export function applyFloatingTargetHitsForBall(
       ? hotdogSpriteHitRadiusPx(sim.h, hdHit.bounds, s, cloudScreenScaleMul)
       : parachutePlaceholderHitRadiusPx(s, cloudScreenScaleMul)
 
+  /* Hotdog parachute: {@link HOTDOG_PAYLOAD_POINTS} — not the same as cloud bullseye {@link CLOUD_TARGET_POINTS}. */
   for (let j = sim.parachutePayloads.length - 1; j >= 0; j--) {
     const p = sim.parachutePayloads[j]
     if (!p.alive) continue
     if (payloadHitR > 0 && circlesOverlap(ball.x, ball.y, br, p.x, p.y, payloadHitR)) {
       p.alive = false
       const mul = Math.max(1, sim.scorePointMultiplier)
-      sim.score += Math.round(CLOUD_TARGET_POINTS * mul)
+      sim.score += Math.round(HOTDOG_PAYLOAD_POINTS * mul)
     }
   }
 

@@ -108,9 +108,6 @@ import {
   type SceneLayout,
 } from './sceneLayout'
 import {
-  makeMiddleRingClusteredSlotAngles,
-  middleRingArtKind,
-  MIDDLE_RING_SLOT_COUNT,
   SALMON_TARGET_SCALE,
   type MiddleRingArtKind,
   type MiddleRingTargetImages,
@@ -121,6 +118,23 @@ import {
   drawMiddleRingSignGoldenHalo,
   TARGET_GOLD_GLOW_SHADOW,
 } from './targetSpriteGlow'
+import {
+  drawHydroRaceInstances,
+  hydroRaceScreenPosition,
+  initHydroRaceState,
+  layoutHydroRaceBand,
+  updateHydroRace,
+  type HydroRaceSim,
+} from './hydroRaceTargets'
+import { rimSlotWorldAngle, type HydroRingImages } from './hydroRingTargets'
+import {
+  drawSalmonRunFish,
+  initSalmonRunState,
+  layoutSalmonRunBand,
+  salmonRunScreenPosition,
+  updateSalmonRun,
+  type SalmonRunSim,
+} from './salmonRunTargets'
 
 /** Board aspect matches design field `2048×1152` until sprites load (then unchanged). */
 const FALLBACK_BOARD_ASPECT = BOARD_DESIGN_ASPECT
@@ -141,11 +155,8 @@ const OUTGOING_GRAVITY = 392
 const RING_OMEGA = 0.55
 /** Concentric rows: index 0 = front/smallest, 2 = back/largest. */
 const RING_COUNT = 3
-const RING_TARGET_COUNTS: [number, number, number] = [
-  7,
-  MIDDLE_RING_SLOT_COUNT,
-  8,
-]
+/** Index 0 = hydro (environmental); index 1 = salmon run (environmental); rim pegs only on back row. */
+const RING_TARGET_COUNTS: [number, number, number] = [0, 0, 8]
 /** Stretch scales with speed / this (px/s) for motion feel. */
 const BALL_STRETCH_SPEED_REF = 720
 const BALL_STRETCH_MAX = 0.48
@@ -670,6 +681,12 @@ type Sim = {
 
   /** Single responsive scale vs 2048×1152 design reference. */
   sceneLayout: SceneLayout
+
+  /** 24 pt Mariners Hydro Challenge — horizontal race in field1 seating (not rim pegs). */
+  hydroRace: HydroRaceSim
+
+  /** 51 pt salmon run — lower field-edge lane (not rim pegs). */
+  salmonRun: SalmonRunSim
 }
 
 function ringMidRadius(Ro: number): number {
@@ -744,10 +761,12 @@ function createDiscRingsForLayout(
   const radii = layoutDiscRingRadii(minDim)
   const centers = layoutGalleryRingCenters(w, h, layout)
   return radii.map((dims, r) => {
-    const omega = r % 2 === 0 ? RING_OMEGA : -RING_OMEGA
+    let omega = r % 2 === 0 ? RING_OMEGA : -RING_OMEGA
+    /** 77 pt back row: opposite spin from the default even-ring direction. */
+    if (r === 2) omega = -omega
     const n = RING_TARGET_COUNTS[r]
     const slotAngles =
-      r === 1 ? makeMiddleRingClusteredSlotAngles() : makeSlotAngles(n)
+      r === 0 || r === 1 ? [] : makeSlotAngles(n)
     return {
       center: centers[r],
       radiusOuter: dims.ro,
@@ -824,10 +843,12 @@ function createInitialTargetSlots(
  * Targets re-arm when they rotate from behind the mask back into the exposed arc.
  */
 function updateDiscTargetStates(sim: Sim): void {
-  for (const ring of sim.rings) {
+  const t = sim.simTime
+  for (let ri = 0; ri < sim.rings.length; ri++) {
+    const ring = sim.rings[ri]
     const Rmid = ringMidFromDiscRing(ring)
     for (let i = 0; i < ring.targetSlots.length; i++) {
-      const a = ring.rotation + ring.slotAngles[i]
+      const a = rimSlotWorldAngle(ring, ri, i, t)
       const isUpper = targetIsExposedAboveOccluder(ring, Rmid, a)
       const s = ring.targetSlots[i]
 
@@ -867,10 +888,12 @@ function updateDiscTargetStates(sim: Sim): void {
 
 /** After mid-frame wasTriggered changes (hit / chain), refresh isActive without re-running crossings. */
 function refreshTargetActiveFlags(sim: Sim): void {
-  for (const ring of sim.rings) {
+  const t = sim.simTime
+  for (let ri = 0; ri < sim.rings.length; ri++) {
+    const ring = sim.rings[ri]
     const Rmid = ringMidFromDiscRing(ring)
     for (let i = 0; i < ring.targetSlots.length; i++) {
-      const a = ring.rotation + ring.slotAngles[i]
+      const a = rimSlotWorldAngle(ring, ri, i, t)
       const isUpper = targetIsExposedAboveOccluder(ring, Rmid, a)
       const s = ring.targetSlots[i]
       s.isCurrentlyUpperHalf = isUpper
@@ -986,7 +1009,8 @@ function drawRingRowTargets(
   ringIdx: number,
   revealLabels: boolean,
   targetR: number,
-  middleRingImgs: MiddleRingTargetImages | null
+  middleRingImgs: MiddleRingTargetImages | null,
+  simTime: number
 ): void {
   const Rmid = ringMidFromDiscRing(ring)
   const { x: cx, y: cy } = ring.center
@@ -997,20 +1021,20 @@ function drawRingRowTargets(
       cy,
       DISC_SX,
       Rmid,
-      ring.rotation + ring.slotAngles[i]
+      rimSlotWorldAngle(ring, ringIdx, i, simTime)
     ).y
     const yb = ringScreenPoint(
       cx,
       cy,
       DISC_SX,
       Rmid,
-      ring.rotation + ring.slotAngles[j]
+      rimSlotWorldAngle(ring, ringIdx, j, simTime)
     ).y
     return ya - yb
   })
 
   for (const i of order) {
-    const a = ring.rotation + ring.slotAngles[i]
+    const a = rimSlotWorldAngle(ring, ringIdx, i, simTime)
     const pt = ringScreenPoint(cx, cy, DISC_SX, Rmid, a)
     const slot = ring.targetSlots[i]
     const upper = slot.isCurrentlyUpperHalf
@@ -1033,10 +1057,10 @@ function drawRingRowTargets(
     const drawDebugLowerDisc = !upper && revealLabels
 
     if (drawLiveDisc || drawDebugLowerDisc) {
-      /** Middle wheel (51 pt): moose + salmon variants; uneven spacing in {@link makeMiddleRingClusteredSlotAngles}. */
-      const kind = ringIdx === 1 ? middleRingArtKind(i) : 'moose'
-      const usedArt =
-        ringIdx === 1 &&
+      /** Back row (77 pt): moose; rows 0–1 use environmental hydro / salmon (see `drawHydroRaceInstances` / `drawSalmonRunFish`). */
+      const kind: MiddleRingArtKind = 'moose'
+      const usedMiddleArt =
+        ringIdx === 2 &&
         drawMiddleRingTargetSprite(
           ctx,
           kind,
@@ -1046,7 +1070,7 @@ function drawRingRowTargets(
           drawDebugLowerDisc ? 0.45 : 1
         )
 
-      if (!usedArt) {
+      if (!usedMiddleArt) {
         ctx.beginPath()
         ctx.arc(pt.x, pt.y, targetR, 0, Math.PI * 2)
         if (drawDebugLowerDisc) {
@@ -1072,16 +1096,24 @@ function drawRingRowTargets(
       }
     }
 
-    if (drawLiveDisc && ringIdx !== 1) {
+    if (drawLiveDisc && ringIdx === 2) {
       const pts = targetPointsForRing(ringIdx)
+      const labelR = targetR * 0.92
       ctx.save()
-      const fontPx = Math.round(clamp(targetR * 1.14, 12, 22))
+      ctx.beginPath()
+      ctx.arc(pt.x, pt.y, labelR, 0, Math.PI * 2)
+      ctx.fillStyle = '#c62828'
+      ctx.fill()
+      ctx.strokeStyle = 'rgba(0,0,0,0.28)'
+      ctx.lineWidth = 1.5
+      ctx.stroke()
+      const fontPx = Math.round(clamp(targetR * 1.02, 11, 20))
       ctx.font = `600 ${fontPx}px "Oswald", "Bebas Neue", Impact, sans-serif`
       ctx.textAlign = 'center'
       ctx.textBaseline = 'middle'
       ctx.lineWidth = 2.25
-      ctx.strokeStyle = 'rgba(0,0,0,0.35)'
-      ctx.fillStyle = 'rgba(255,255,255,0.97)'
+      ctx.strokeStyle = 'rgba(0,0,0,0.45)'
+      ctx.fillStyle = 'rgba(255,255,255,0.98)'
       ctx.strokeText(String(pts), pt.x, pt.y)
       ctx.fillText(String(pts), pt.x, pt.y)
       ctx.restore()
@@ -1092,10 +1124,7 @@ function drawRingRowTargets(
       ctx.font = '9px ui-monospace, monospace'
       ctx.fillStyle = 'rgba(255,255,255,0.72)'
       const tag = upper ? (active ? 'LIVE' : 'hit') : 'off'
-      const label =
-        ringIdx === 1
-          ? `${ringIdx}:${middleRingArtKind(i)}:${tag}`
-          : `${ringIdx}:${tag}`
+      const label = `${ringIdx}:${tag}`
       ctx.fillText(label, pt.x - 12, pt.y + 4)
       ctx.restore()
     }
@@ -1245,6 +1274,8 @@ function createSim(w: number, h: number): Sim {
     parachutePayloads: [],
     cloudSpawnCountdown: 0,
     nextFloatingTargetId: 1,
+    hydroRace: initHydroRaceState(w, h),
+    salmonRun: initSalmonRunState(w, h),
   }
   initFloatingCloudLayer(sim)
   initSpacey(sim)
@@ -1279,6 +1310,8 @@ function layoutSim(
     sim.batLen = Math.min(w, h) * 0.216
   }
   syncGalleryLayout(sim, w, h)
+  layoutHydroRaceBand({ w, h, hydroRace: sim.hydroRace })
+  layoutSalmonRunBand({ w, h, salmonRun: sim.salmonRun })
 }
 
 function pointerToLogical(
@@ -2127,8 +2160,14 @@ function localTargetDepthOnWheel(worldAngle: number): number {
 }
 
 type TargetHitCandidate = {
+  /** Disc peg vs environmental hydro (24 pt) / salmon (51 pt). */
+  kind: 'disc' | 'hydro' | 'salmon'
   ringIdx: number
   slotIdx: number
+  /** Set when `kind === 'hydro'` (index into `sim.hydroRace.instances`). */
+  hydroInstanceIdx?: number
+  /** Set when `kind === 'salmon'` (index into `sim.salmonRun.fish`). */
+  salmonInstanceIdx?: number
   tHit: number
   rowDepth: number
   localDepth: number
@@ -2158,16 +2197,18 @@ function flightUnitVector(b: Ball, x0: number, y0: number, x1: number, y1: numbe
   return { ux: 1, uy: 0 }
 }
 
+type OutgoingTargetHit =
+  | { kind: 'disc'; ring: number; idx: number }
+  | { kind: 'hydro'; instanceIdx: number }
+  | { kind: 'salmon'; instanceIdx: number }
+
 /**
  * One shot → one primary target: gather segment overlaps, then pick the intercept that
  * best matches the ball’s flight corridor (perp distance to velocity ray), not merely
  * earliest screen-space entry — reduces “right-edge vacuum” steals from weak alignment.
+ * Includes environmental hydro (24 pt) and salmon run (51 pt) when those rim rows have no pegs.
  */
-function resolveSingleTargetHit(
-  sim: Sim,
-  b: Ball,
-  dt: number
-): { ring: number; idx: number } | null {
+function resolveOutgoingTargetHit(sim: Sim, b: Ball, dt: number): OutgoingTargetHit | null {
   const x0 = b.x - b.vx * dt
   const y0 = b.y - b.vy * dt
   const x1 = b.x
@@ -2177,6 +2218,10 @@ function resolveSingleTargetHit(
   const { ux, uy } = flightUnitVector(b, x0, y0, x1, y1)
 
   const candidates: TargetHitCandidate[] = []
+  const band = {
+    yMin: sim.hydroRace.bandYMin,
+    yMax: sim.hydroRace.bandYMax,
+  }
 
   for (let r = minRing; r < RING_COUNT; r++) {
     const ring = sim.rings[r]
@@ -2185,7 +2230,7 @@ function resolveSingleTargetHit(
     for (let i = 0; i < ring.targetSlots.length; i++) {
       const slot = ring.targetSlots[i]
       if (!slot.isActive) continue
-      const worldAngle = ring.rotation + ring.slotAngles[i]
+      const worldAngle = rimSlotWorldAngle(ring, r, i, sim.simTime)
       if (!targetIsExposedAboveOccluder(ring, Rmid, worldAngle)) continue
 
       const tp = ringScreenPoint(
@@ -2196,9 +2241,7 @@ function resolveSingleTargetHit(
         worldAngle
       )
 
-      const kind = r === 1 ? middleRingArtKind(i) : 'moose'
-      const slotTR =
-        r === 1 && kind !== 'moose' ? tR * SALMON_TARGET_SCALE : tR
+      const slotTR = tR
       const expandedR = slotTR + b.r
 
       let tHit = segmentCircleEarliestHit(
@@ -2233,8 +2276,133 @@ function resolveSingleTargetHit(
         pathAlign01 * 100 - tHit * 18 + depthScore * 6 + rowDepth * 0.35
 
       candidates.push({
+        kind: 'disc',
         ringIdx: r,
         slotIdx: i,
+        tHit,
+        rowDepth,
+        localDepth,
+        perpDist: perp,
+        alongRay: along,
+        effPerp,
+        effSort,
+        pathAlign01,
+        depthScore,
+        combinedScore,
+      })
+    }
+  }
+
+  if (minRing === 0) {
+    const rowDepth = 0
+    const hr = sim.hydroRace.instances
+    for (let hi = 0; hi < hr.length; hi++) {
+      const inst = hr[hi]!
+      if (inst.wasTriggered) continue
+      const tp = hydroRaceScreenPosition(inst, sim.simTime, band)
+      const expandedR = tR + b.r
+
+      let tHit = segmentCircleEarliestHit(
+        x0,
+        y0,
+        x1,
+        y1,
+        tp.x,
+        tp.y,
+        expandedR
+      )
+      if (
+        tHit == null &&
+        circlesOverlap(x1, y1, b.r, tp.x, tp.y, tR)
+      ) {
+        tHit = 1
+      }
+      if (tHit == null) continue
+
+      const { perp, along } = distPointToUnitRay(tp.x, tp.y, x0, y0, ux, uy)
+      const behind = along < 0 ? -along * HIT_BEHIND_RAY_PENALTY : 0
+      const effPerp = perp + behind
+      const effSort = effPerp - rowDepth * HIT_DEPTH_SORT_BIAS
+      const pathAlign01 = clamp(
+        1 - effPerp / (expandedR * HIT_PATH_CORRIDOR_MULT),
+        0,
+        1
+      )
+      const localDepth = 0.5
+      const depthScore =
+        rowDepth / Math.max(1, RING_COUNT - 1) * 0.55 + localDepth * 0.45
+      const combinedScore =
+        pathAlign01 * 100 - tHit * 18 + depthScore * 6 + rowDepth * 0.35
+
+      candidates.push({
+        kind: 'hydro',
+        ringIdx: 0,
+        slotIdx: hi,
+        hydroInstanceIdx: hi,
+        tHit,
+        rowDepth,
+        localDepth,
+        perpDist: perp,
+        alongRay: along,
+        effPerp,
+        effSort,
+        pathAlign01,
+        depthScore,
+        combinedScore,
+      })
+    }
+  }
+
+  if (minRing <= 1) {
+    const sBand = {
+      yMin: sim.salmonRun.bandYMin,
+      yMax: sim.salmonRun.bandYMax,
+    }
+    const rowDepth = 1
+    const slotTR = tR * SALMON_TARGET_SCALE
+    const sf = sim.salmonRun.fish
+    for (let si = 0; si < sf.length; si++) {
+      const fish = sf[si]!
+      const tp = salmonRunScreenPosition(fish, sim.simTime, sBand)
+      const expandedR = slotTR + b.r
+
+      let tHit = segmentCircleEarliestHit(
+        x0,
+        y0,
+        x1,
+        y1,
+        tp.x,
+        tp.y,
+        expandedR
+      )
+      if (
+        tHit == null &&
+        circlesOverlap(x1, y1, b.r, tp.x, tp.y, slotTR)
+      ) {
+        tHit = 1
+      }
+      if (tHit == null) continue
+
+      const { perp, along } = distPointToUnitRay(tp.x, tp.y, x0, y0, ux, uy)
+      const behind = along < 0 ? -along * HIT_BEHIND_RAY_PENALTY : 0
+      const effPerp = perp + behind
+      const effSort = effPerp - rowDepth * HIT_DEPTH_SORT_BIAS
+      const pathAlign01 = clamp(
+        1 - effPerp / (expandedR * HIT_PATH_CORRIDOR_MULT),
+        0,
+        1
+      )
+      const localDepth = 0.5
+      const depthScore =
+        rowDepth / Math.max(1, RING_COUNT - 1) * 0.55 + localDepth * 0.45
+      const combinedScore =
+        pathAlign01 * 100 - tHit * 18 + depthScore * 6 + rowDepth * 0.35
+
+      candidates.push({
+        kind: 'salmon',
+        ringIdx: 1,
+        slotIdx: si,
+        salmonInstanceIdx: si,
         tHit,
         rowDepth,
         localDepth,
@@ -2265,20 +2433,34 @@ function resolveSingleTargetHit(
   })
 
   const win = candidates[0]
-  sim.debugHitWinnerLine = `WIN r${win.ringIdx} s${win.slotIdx} t=${win.tHit.toFixed(3)} perp=${win.perpDist.toFixed(1)} eff=${win.effPerp.toFixed(1)} align=${win.pathAlign01.toFixed(2)} zR=${win.rowDepth} zL=${win.localDepth.toFixed(2)} comb=${win.combinedScore.toFixed(1)} (n=${candidates.length})`
+  const tag =
+    win.kind === 'hydro'
+      ? 'hydro'
+      : win.kind === 'salmon'
+        ? 'salmon'
+        : 'disc'
+  sim.debugHitWinnerLine = `WIN ${tag} r${win.ringIdx} s${win.slotIdx} t=${win.tHit.toFixed(3)} perp=${win.perpDist.toFixed(1)} eff=${win.effPerp.toFixed(1)} align=${win.pathAlign01.toFixed(2)} zR=${win.rowDepth} zL=${win.localDepth.toFixed(2)} comb=${win.combinedScore.toFixed(1)} (n=${candidates.length})`
 
   const topN = Math.min(5, candidates.length)
   const lines: string[] = []
   for (let k = 0; k < topN; k++) {
     const c = candidates[k]
-    const tag = k === 0 ? '★' : ' '
+    const star = k === 0 ? '★' : ' '
+    const knd =
+      c.kind === 'hydro' ? 'H' : c.kind === 'salmon' ? 'S' : 'D'
     lines.push(
-      `${tag} r${c.ringIdx}s${c.slotIdx} t=${c.tHit.toFixed(2)} perp=${c.perpDist.toFixed(1)} align=${c.pathAlign01.toFixed(2)} depth=${c.depthScore.toFixed(2)} comb=${c.combinedScore.toFixed(1)}`
+      `${star} ${knd} r${c.ringIdx}s${c.slotIdx} t=${c.tHit.toFixed(2)} perp=${c.perpDist.toFixed(1)} align=${c.pathAlign01.toFixed(2)} depth=${c.depthScore.toFixed(2)} comb=${c.combinedScore.toFixed(1)}`
     )
   }
   sim.debugHitCandidateLines = lines
 
-  return { ring: win.ringIdx, idx: win.slotIdx }
+  if (win.kind === 'hydro') {
+    return { kind: 'hydro', instanceIdx: win.hydroInstanceIdx ?? win.slotIdx }
+  }
+  if (win.kind === 'salmon') {
+    return { kind: 'salmon', instanceIdx: win.salmonInstanceIdx ?? win.slotIdx }
+  }
+  return { kind: 'disc', ring: win.ringIdx, idx: win.slotIdx }
 }
 
 function chainDestroyNeighbors(
@@ -2287,10 +2469,11 @@ function chainDestroyNeighbors(
   hitIndex: number
 ): void {
   const ring = sim.rings[ringIdx]
-  const aHit = ring.rotation + ring.slotAngles[hitIndex]
+  const t = sim.simTime
+  const aHit = rimSlotWorldAngle(ring, ringIdx, hitIndex, t)
   for (let j = 0; j < ring.targetSlots.length; j++) {
     if (j === hitIndex || !ring.targetSlots[j].isActive) continue
-    const aj = ring.rotation + ring.slotAngles[j]
+    const aj = rimSlotWorldAngle(ring, ringIdx, j, t)
     if (angularDiff(aHit, aj) <= CHAIN_ANGLE_RAD) {
       ring.targetSlots[j].wasTriggered = true
       ring.targetSlots[j].isActive = false
@@ -2309,6 +2492,11 @@ function drawPowerBar(
     fullSendLocked?: boolean
     perfectSendLocked?: boolean
     fullSendZoneLive?: boolean
+    /** Desktop only: shift bar up / left (px); see draw() call sites. */
+    powerBarNudgeUpPx?: number
+    powerBarNudgeLeftPx?: number
+    /** Subtracted from width and height (e.g. desktop tweak). */
+    powerBarShrinkPx?: number
   }
 ): void {
   const { pivot: p, batLen: L } = sim
@@ -2317,11 +2505,16 @@ function drawPowerBar(
   const { w: cw, h: ch } = sim
 
   /** Match field-layer digital board: slim strip above Ichiro (~⅓ canvas width). */
-  const barW = Math.min(cw - padEdge * 2, cw * POWER_FIELD_BOARD_WIDTH_FR)
-  const barH = Math.max(
+  let barW = Math.min(cw - padEdge * 2, cw * POWER_FIELD_BOARD_WIDTH_FR)
+  let barH = Math.max(
     designPx(sim.sceneLayout, 5.5),
     barW / POWER_FIELD_BOARD_ASPECT
   )
+  const shrink = opts?.powerBarShrinkPx ?? 0
+  if (shrink > 0) {
+    barW = Math.max(20 * s, barW - shrink)
+    barH = Math.max(designPx(sim.sceneLayout, 4.25), barH - shrink)
+  }
 
   const shearPx = barW * POWER_FIELD_BOARD_SHEAR_RISE_PER_WIDTH_FR
   const shearYPerX = shearPx / Math.max(barW, 1)
@@ -2354,6 +2547,16 @@ function drawPowerBar(
     by = batCrownY - shearPx - 4 * s
   }
   by = clamp(by, padEdge, ch - barH - shearPx - padEdge)
+  const nudgeUp = opts?.powerBarNudgeUpPx ?? 0
+  if (nudgeUp > 0) {
+    by -= nudgeUp
+    by = clamp(by, padEdge, ch - barH - shearPx - padEdge)
+  }
+  const nudgeLeft = opts?.powerBarNudgeLeftPx ?? 0
+  if (nudgeLeft > 0) {
+    bx -= nudgeLeft
+    bx = clamp(bx, padEdge, cw - barW - padEdge)
+  }
 
   const phaseDim =
     sim.phase === 'recovery' ? 0.55 : sim.phase === 'swing' ? 0.88 : 1
@@ -3016,6 +3219,12 @@ export function GameCanvas({
     salmon3: null,
     salmon4: null,
   })
+  const hydroRingImgsRef = useRef<HydroRingImages>({
+    silver: null,
+    green: null,
+    red: null,
+    yellow: null,
+  })
   const devDrawOptionsRef = useRef<DevDrawOptions>({
     clipDiscLowerHalf: true,
     revealHiddenLayers: false,
@@ -3185,6 +3394,45 @@ export function GameCanvas({
 
   useEffect(() => {
     let cancelled = false
+    const bump = () => {
+      if (!cancelled) setSpritesRevision((n) => n + 1)
+    }
+    const urls: Record<keyof HydroRingImages, string> = {
+      silver: '/assets/hydroplanes/silver.webp',
+      green: '/assets/hydroplanes/green.webp',
+      red: '/assets/hydroplanes/red.webp',
+      yellow: '/assets/hydroplanes/yellow.webp',
+    }
+    ;(Object.keys(urls) as (keyof HydroRingImages)[]).forEach((key) => {
+      const im = new Image()
+      im.decoding = 'async'
+      im.onload = () => {
+        if (!cancelled) {
+          hydroRingImgsRef.current[key] = im
+          bump()
+        }
+      }
+      im.onerror = () => {
+        if (!cancelled) {
+          hydroRingImgsRef.current[key] = null
+          bump()
+        }
+      }
+      im.src = urls[key]
+    })
+    return () => {
+      cancelled = true
+      hydroRingImgsRef.current = {
+        silver: null,
+        green: null,
+        red: null,
+        yellow: null,
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
     loadPitcherPack().then((pack) => {
       if (cancelled) return
       pitcherPackRef.current = pack
@@ -3325,6 +3573,30 @@ export function GameCanvas({
       drawSpacey(ctx, sim, sprites.spacey, sprites.spacey2)
       drawSpaceyCelebrationOverlays(ctx, sim)
       drawBackgroundFieldLayer(ctx, sprites.bgFieldFront, w, h)
+      if (dev.enableSpinningDiscs) {
+        drawHydroRaceInstances(
+          ctx,
+          sim.hydroRace.instances,
+          hydroRingImgsRef.current,
+          targetRDraw,
+          sim.simTime,
+          {
+            yMin: sim.hydroRace.bandYMin,
+            yMax: sim.hydroRace.bandYMax,
+          }
+        )
+        drawSalmonRunFish(
+          ctx,
+          sim.salmonRun.fish,
+          middleRingTargetImgsRef.current,
+          targetRDraw,
+          sim.simTime,
+          {
+            yMin: sim.salmonRun.bandYMin,
+            yMax: sim.salmonRun.bandYMax,
+          }
+        )
+      }
     }
 
     drawReleaseFlash(ctx, sim)
@@ -3346,7 +3618,8 @@ export function GameCanvas({
             r,
             dev.revealHiddenLayers,
             targetRDraw,
-            middleRingTargetImgsRef.current
+            middleRingTargetImgsRef.current,
+            sim.simTime
           )
           ctx.restore()
         }
@@ -3366,7 +3639,8 @@ export function GameCanvas({
             r,
             dev.revealHiddenLayers,
             targetRDraw,
-            middleRingTargetImgsRef.current
+            middleRingTargetImgsRef.current,
+            sim.simTime
           )
         }
       }
@@ -3482,14 +3756,23 @@ export function GameCanvas({
       drawStandBase(ctx, sprites.stand, w, h, sim.spriteLayout, sim.sceneLayout)
     }
 
+    const desktopPowerBarNudgeUpPx = layoutRef.current.isMobile ? 0 : 10
+    const desktopPowerBarNudgeLeftPx = layoutRef.current.isMobile ? 0 : 4
+    const desktopPowerBarShrinkPx = layoutRef.current.isMobile ? 0 : 2
     if (sim.phase === 'charging') {
       drawPowerBar(ctx, sim, sim.pCurrent, 'power', {
         fullSendZoneLive: isFullSendZone(sim.pCurrent),
+        powerBarNudgeUpPx: desktopPowerBarNudgeUpPx,
+        powerBarNudgeLeftPx: desktopPowerBarNudgeLeftPx,
+        powerBarShrinkPx: desktopPowerBarShrinkPx,
       })
     } else if (sim.phase === 'swing' || sim.phase === 'recovery') {
       drawPowerBar(ctx, sim, sim.pRelease, '', {
         fullSendLocked: sim.powerTierRelease === 'full_send',
         perfectSendLocked: sim.powerTierRelease === 'perfect_full_send',
+        powerBarNudgeUpPx: desktopPowerBarNudgeUpPx,
+        powerBarNudgeLeftPx: desktopPowerBarNudgeLeftPx,
+        powerBarShrinkPx: desktopPowerBarShrinkPx,
       })
     }
 
@@ -3689,6 +3972,14 @@ export function GameCanvas({
     sim.simTime += dt
     updateFloatingCloudLayer(sim, dt)
     updateSpacey(sim, dt)
+    updateHydroRace(
+      { w: sim.w, hydroRace: sim.hydroRace, simTime: sim.simTime },
+      dt
+    )
+    updateSalmonRun(
+      { w: sim.w, salmonRun: sim.salmonRun, simTime: sim.simTime },
+      dt
+    )
 
     if (
       sim.timedMode &&
@@ -4047,41 +4338,58 @@ export function GameCanvas({
         sim.ballTrail.length >= 2 ? sim.ballTrail[1]! : null
       )
 
-      let hitRing = -1
-      let hitIdx = -1
+      let hit: OutgoingTargetHit | null = null
       if (devDrawOptionsRef.current.enableSpinningDiscs) {
-        const resolved = resolveSingleTargetHit(sim, bOut, dt)
-        if (resolved != null) {
-          hitRing = resolved.ring
-          hitIdx = resolved.idx
-        }
+        hit = resolveOutgoingTargetHit(sim, bOut, dt)
       } else {
         sim.debugHitCandidateCount = 0
         sim.debugHitWinnerLine = ''
         sim.debugHitCandidateLines = []
       }
 
-      if (hitRing >= 0 && hitIdx >= 0) {
+      if (hit != null) {
         const tier = sim.ballShotTier
         const mul = Math.max(1, sim.scorePointMultiplier)
-        sim.score += Math.round(targetPointsForRing(hitRing) * mul)
+        const ringForPoints =
+          hit.kind === 'hydro' ? 0 : hit.kind === 'salmon' ? 1 : hit.ring
+        sim.score += Math.round(targetPointsForRing(ringForPoints) * mul)
 
-        const struck = sim.rings[hitRing].targetSlots[hitIdx]
-        struck.wasTriggered = true
-        struck.isActive = false
+        if (hit.kind === 'hydro') {
+          const inst = sim.hydroRace.instances[hit.instanceIdx]
+          if (inst) inst.wasTriggered = true
+        } else if (hit.kind === 'salmon') {
+          const fish = sim.salmonRun.fish[hit.instanceIdx]
+          if (fish) {
+            sim.salmonRun.fish = sim.salmonRun.fish.filter(
+              (x) => x.id !== fish.id
+            )
+          }
+        } else {
+          const struck = sim.rings[hit.ring].targetSlots[hit.idx]
+          struck.wasTriggered = true
+          struck.isActive = false
+        }
 
         if (tier === 'perfect_full_send' && sim.ballPierceArmed) {
           sim.ballPierceArmed = false
-          sim.ballNextHitMinRing = Math.min(hitRing + 1, RING_COUNT)
+          sim.ballNextHitMinRing = Math.min(ringForPoints + 1, RING_COUNT)
           bOut.vx *= PIERCE_SPEED_MUL
           bOut.vy *= PIERCE_SPEED_MUL
           console.log('hit (pierce — perfect full send)')
         } else if (tier === 'full_send') {
-          chainDestroyNeighbors(sim, hitRing, hitIdx)
+          if (hit.kind === 'disc') {
+            chainDestroyNeighbors(sim, hit.ring, hit.idx)
+          }
           sim.ball = null
           sim.ballTrail = []
           sim.ballRole = 'none'
-          console.log('hit (full send + chain)')
+          console.log(
+            hit.kind === 'hydro'
+              ? 'hit (full send — hydro)'
+              : hit.kind === 'salmon'
+                ? 'hit (full send — salmon)'
+                : 'hit (full send + chain)'
+          )
         } else {
           sim.ball = null
           sim.ballTrail = []
